@@ -1,6 +1,6 @@
 {
   "name": "obox-webapp-ext",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "网页应用扩展（Obox 用户扩展，经 .oix 分发安装）：把内部站点以 Chrome 应用模式打开，按条目独立 profile。与 obox 宿主只有扩展 API 依赖关系。",
   "license": "MIT",

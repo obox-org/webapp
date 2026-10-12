@@ -7,14 +7,14 @@
 
 ## 1. 票与实现落点（spec §24）
 
-| 票 | 内容 | 落点 |
-|---|---|---|
-| 01–04 | 工程骨架、manifest、助手（Chrome 4 顺位探测/参数构造/启动）、纯逻辑（净化/校验/origin 推导/参数构造） | `manifest.json`、`helper.cjs`、`lib/{nameSanitize,chromeArgs,entryFields,webapp,profileLimit}.mjs` |
-| 05–08 | 界面与构建：卡片列表、新建/编辑模态、删除确认、超限拦截、状态栏 | `src/**`（14 文件：`App.vue` 405 行、`styles.css` 714 行、`fields.js` 297 行、`components/*` 7 个）+ `ui/**` 构建产物 |
-| **07（本次补齐的阻塞项）** | **接线层：8 方法分发、sqlite 表与大小写不敏感唯一索引、设置读取、打开前体积预检** | `index.js`（580 行，8 个 `case` 见 §3） |
-| 09 | 打包 `.oix`（排除 `data/` 等 + 硬闸门） | `scripts/pack.mjs`（202 行） |
-| 10 | 文档 | `README.md`（172 行）、`docs/evidence/*` |
-| 11 | R17 体积上限全链路（设置→预检→拦截→清理） | `index.js` 预检分支 + `src/components/OverLimitModal.vue` + `lib/profileLimit.mjs` |
+| 票                         | 内容                                                                                                  | 落点                                                                                                                  |
+| -------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 01–04                      | 工程骨架、manifest、助手（Chrome 4 顺位探测/参数构造/启动）、纯逻辑（净化/校验/origin 推导/参数构造） | `manifest.json`、`helper.cjs`、`lib/{nameSanitize,chromeArgs,entryFields,webapp,profileLimit}.mjs`                    |
+| 05–08                      | 界面与构建：卡片列表、新建/编辑模态、删除确认、超限拦截、状态栏                                       | `src/**`（14 文件：`App.vue` 405 行、`styles.css` 714 行、`fields.js` 297 行、`components/*` 7 个）+ `ui/**` 构建产物 |
+| **07（本次补齐的阻塞项）** | **接线层：8 方法分发、sqlite 表与大小写不敏感唯一索引、设置读取、打开前体积预检**                     | `index.js`（580 行，8 个 `case` 见 §3）                                                                               |
+| 09                         | 打包 `.oix`（排除 `data/` 等 + 硬闸门）                                                               | `scripts/pack.mjs`（202 行）                                                                                          |
+| 10                         | 文档                                                                                                  | `README.md`（172 行）、`docs/evidence/*`                                                                              |
+| 11                         | R17 体积上限全链路（设置→预检→拦截→清理）                                                             | `index.js` 预检分支 + `src/components/OverLimitModal.vue` + `lib/profileLimit.mjs`                                    |
 
 ## 2. 门槛（最终一次，协调者 23:14 亲自复跑）
 

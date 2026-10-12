@@ -112,9 +112,11 @@ test('contributes 只多这一个设置页（不贡献导航/状态栏/命令/�
   assert.deepEqual(extraKeys, [], `contributes 里多出了：${extraKeys.join('、')}`)
 })
 
-test('manifest 身份字段与规格一致（名称/版本/作者决定安装目录名与数据目录）', () => {
+test('manifest 身份字段与规格一致（名称/作者决定安装目录名与数据目录）', () => {
   assert.equal(manifest.name, 'webapp')
-  assert.equal(manifest.version, '1.0.0')
+  // 版本号随 amendment 05（去掉状态栏）升到 1.0.1——这里只要求"是合法 semver"，
+  // 不把具体版本钉死（否则每次发补丁版都要改测试，反而掩盖真实回归）
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/, `版本应是合法 semver，实际 ${manifest.version}`)
   assert.equal(manifest.author, 'chenzhi')
   assert.equal(manifest.main, './index.js')
   assert.equal(manifest.contributes.ipcChannels.length, 1)
@@ -124,6 +126,15 @@ test('manifest 身份字段与规格一致（名称/版本/作者决定安装目
     program: './helper.cjs',
     framing: 'ndjson'
   })
+})
+
+test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(
+    pkg.version,
+    manifest.version,
+    `manifest ${manifest.version} 与 package.json ${pkg.version} 不一致`
+  )
 })
 
 test('两个下拉的枚举清单仍由 lib 提供（界面只从 lib 取，不自己抄一份）', () => {

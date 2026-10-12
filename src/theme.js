@@ -19,7 +19,14 @@
  * 本模块**顶层零副作用**：所有 DOM 访问都在函数内、且可注入，node 环境下可直接单测。
  */
 
-/** 宿主当前主题 token 的兜底值（= 宿主 dark 默认值，逐条对齐 `src/renderer/src/assets/main.css:2-29`） */
+/**
+ * 宿主当前主题 token 的兜底值（= 宿主 dark 默认值，逐条对齐 `src/renderer/src/assets/main.css:2-29`）。
+ *
+ * ⚠️ 这里**只放界面真的会用到**的 token：1.0.1 去掉底部状态栏后，`--statusbar-bg` /
+ * `--statusbar-fg` 已无消费方（`styles.css` 里零引用），因此从兜底表里删掉——
+ * 兜底表是"要跟随宿主、会漂移"的副本，留着不用的条目只会增加漂移面。
+ * 宿主仍然会推送这两个 token，`applyThemeTokens` 会一并写到 `documentElement`（无害）。
+ */
 export const FALLBACK_TOKENS = {
   '--bg': '#1e1e1e',
   '--bg-panel': '#252526',
@@ -38,8 +45,6 @@ export const FALLBACK_TOKENS = {
   '--hover-bg': 'rgba(255, 255, 255, 0.1)',
   '--selection-bg': '#094771',
   '--nav-icon': '#858585',
-  '--statusbar-bg': '#2a2a2a',
-  '--statusbar-fg': '#cccccc',
   '--font-family':
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif",
   '--font-size': '13px',

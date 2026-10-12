@@ -8,19 +8,22 @@
  * **R17 的三条界面链路**（票 11）：
  * 1. `open` 被体积上限拦截（`error` 以 `[profile-over-limit]` 开头）→ 弹 `OverLimitModal`；
  *    「清理缓存并打开」→ `cleanCaches({ id })` → 重新 `open`；「仍然打开」→ `open({ id, force: true })`；
- * 2. 列表页右上「清理全部缓存」→ 二次确认 → `cleanCaches({})` → 状态栏报"已清理 N 项，释放 X"；
+ * 2. 列表页右上「清理全部缓存」→ 二次确认 → `cleanCaches({})`（结果走控制台，见 `setStatus`）；
  * 3. 卡片上的「体积」按钮 → `profileSize({ id })` **按需**查询（绝不常驻轮询、不在 list 时扫盘）。
  *
  * 界面**从不算体积、从不删数据**：一切都是用户点出来的动作，删除只发生在用户确认之后。
+ *
+ * ⚠️ **本界面没有底部状态栏**（用户要求"彻底不要提示"，见
+ * `docs/spec/amendments/05-remove-status-bar.md`）：所有操作/错误文案只进开发者控制台。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import WebappCard from './components/WebappCard.vue'
 import WebappModal from './components/WebappModal.vue'
 import DeleteConfirm from './components/DeleteConfirm.vue'
 import OverLimitModal from './components/OverLimitModal.vue'
 import EmptyState from './components/EmptyState.vue'
-import StatusBar from './components/StatusBar.vue'
 import { callExtension } from './bridge.js'
+import { filterAndRank, isSearching } from './search.js'
 
 /** 体积超限的错误前缀（规格 S17：唯一用 `ok:false` 承载"需要用户选择"的场景） */
 const OVER_LIMIT_PREFIX = '[profile-over-limit]'
@@ -28,11 +31,6 @@ const OVER_LIMIT_PREFIX = '[profile-over-limit]'
 const rows = ref([])
 const loading = ref(true)
 const loadError = ref('')
-
-/** 状态栏 */
-const status = ref('')
-const statusKind = ref('info')
-const statusCollapsed = ref(false)
 
 /** 模态框状态 */
 const modalOpen = ref(false)
@@ -63,12 +61,48 @@ const sizeById = ref({})
 /** 正在查体积的条目 id */
 const sizeLoadingId = ref(null)
 
-/** 展示顺序：新条目在最上面（后端按 createdAt 升序返回） */
-const displayRows = computed(() => [...rows.value].reverse())
+// ---- 搜索（模糊匹配的实现在 `src/search.js`，纯函数、可单测） ----
 
+/** 搜索框的当前输入（原始字符串） */
+const query = ref('')
+/** 搜索框元素（清空后把焦点还回去） */
+const searchInput = ref(null)
+
+/** 是否是"正在搜索"（区分「还没有条目」与「无匹配」两种空态） */
+const searching = computed(() => isSearching(query.value))
+
+/**
+ * 展示顺序：**按匹配分数降序**（无查询时保持"新条目在最上面"）。
+ * 先把后端的 createdAt 升序倒过来，再交给 `filterAndRank` 打分排序。
+ */
+const displayRows = computed(() => {
+  const newestFirst = [...rows.value].reverse()
+  if (!searching.value) return newestFirst
+  return filterAndRank(newestFirst, query.value)
+})
+
+/** 清空搜索（Esc 与「清空」按钮共用；清空后把焦点还给搜索框，方便继续输入） */
+function clearQuery() {
+  query.value = ''
+  nextTick(() => searchInput.value?.focus())
+}
+
+/**
+ * 记录一次操作结果。
+ *
+ * ⚠️ **用户已要求界面不显示操作/错误提示**（连 R8 的"未找到 Chrome 时列出查找过的路径"
+ * 也不再显示），因此这里**只写控制台**、不写任何 UI。
+ *
+ * 为什么保留全部调用点而不是把调用删掉：这些日志是**唯一的诊断通道**
+ * （子窗口日志会经主进程转发到终端，前缀 `[child-renderer:*]`）。
+ * 出问题时让用户开 DevTools / 看终端即可还原完整过程。
+ *
+ * @param {string} text 面向人的一句话
+ * @param {'info'|'ok'|'error'} [kind] 成功走 `console.info`、失败走 `console.error`
+ */
 function setStatus(text, kind = 'info') {
-  status.value = text
-  statusKind.value = kind
+  if (kind === 'error') console.error(`[webapp] ${text}`)
+  else console.info(`[webapp] ${text}`)
 }
 
 function messageOf(err) {
@@ -357,29 +391,52 @@ function formatBytes(bytes) {
     <main class="app__main">
       <p v-if="loading" class="app__loading">正在加载…</p>
       <p v-else-if="loadError" class="alert alert--error">{{ loadError }}</p>
-      <EmptyState v-else-if="!displayRows.length" @action="openCreate" />
-      <div v-else class="app__grid">
-        <WebappCard
-          v-for="row in displayRows"
-          :key="row.id"
-          :row="row"
-          :state="openingId === row.id ? 'opening' : 'idle'"
-          :size="sizeById[row.id] || null"
-          :size-loading="sizeLoadingId === row.id"
-          @open="doOpen(row)"
-          @edit="openEdit(row)"
-          @delete="openDelete(row)"
-          @size="querySize(row)"
-        />
-      </div>
-    </main>
+      <template v-else>
+        <!-- 搜索框：列表之上、实时过滤；Esc 清空（只在搜索框聚焦时生效，不干扰模态框） -->
+        <div v-if="rows.length" class="app__search">
+          <input
+            ref="searchInput"
+            v-model="query"
+            class="input app__search-input"
+            type="search"
+            placeholder="搜索名称 / 地址 / 说明"
+            aria-label="搜索网页应用"
+            @keydown.esc="clearQuery"
+          />
+          <button v-if="query" type="button" class="btn" @click="clearQuery">清空</button>
+        </div>
 
-    <StatusBar
-      :text="status"
-      :kind="statusKind"
-      :collapsed="statusCollapsed"
-      @toggle="statusCollapsed = !statusCollapsed"
-    />
+        <EmptyState
+          v-if="!rows.length"
+          title="还没有网页应用"
+          hint="把内部站点登记进来，点一下就用独立的 Chrome 应用窗口打开。"
+          action-label="＋ 新建"
+          @action="openCreate"
+        />
+        <!-- 无匹配：复用同一个空态组件，只换文案与按钮（不新造一套） -->
+        <EmptyState
+          v-else-if="!displayRows.length"
+          title="没有匹配的网页应用"
+          :hint="`没有名称 / 地址 / 说明能匹配「${query}」的条目。`"
+          action-label="清空搜索"
+          @action="clearQuery"
+        />
+        <div v-else class="app__grid">
+          <WebappCard
+            v-for="row in displayRows"
+            :key="row.id"
+            :row="row"
+            :state="openingId === row.id ? 'opening' : 'idle'"
+            :size="sizeById[row.id] || null"
+            :size-loading="sizeLoadingId === row.id"
+            @open="doOpen(row)"
+            @edit="openEdit(row)"
+            @delete="openDelete(row)"
+            @size="querySize(row)"
+          />
+        </div>
+      </template>
+    </main>
 
     <WebappModal
       v-if="modalOpen"
