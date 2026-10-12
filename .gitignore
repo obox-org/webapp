@@ -1,0 +1,13 @@
+# 依赖：由 package-lock.json 还原
+node_modules/
+
+# 构建产物：.oix 包（out/）与 vite 产物（ui/），均可由源码重建
+out/
+ui/
+
+# 运行时数据：条目库（webapp.db）与各站点的 Chrome profile，绝不入库
+data/
+
+# 日志与系统垃圾文件
+*.log
+.DS_Store

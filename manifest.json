@@ -1,0 +1,54 @@
+{
+  "name": "webapp",
+  "version": "1.0.0",
+  "displayName": "网页应用",
+  "author": "chenzhi",
+  "apiVersion": 1,
+  "description": "网页应用：以 Chrome 应用模式打开内部站点，按条目独立 profile，可按条目忽略证书错误",
+  "main": "./index.js",
+  "contributes": {
+    "ipcChannels": [
+      {
+        "id": "webapp.helper",
+        "transport": "stdio",
+        "program": "./helper.cjs",
+        "framing": "ndjson"
+      }
+    ],
+    "settings": {
+      "id": "webapp.settings",
+      "title": "网页应用",
+      "fields": [
+        {
+          "key": "webapp.profileLimitMb",
+          "label": "单站点数据上限",
+          "type": "select",
+          "default": "2048",
+          "options": [
+            { "value": "0", "label": "不限制（不推荐）" },
+            { "value": "512", "label": "512 MB（缓存上限 512 MB）" },
+            { "value": "1024", "label": "1 GB（缓存上限 512 MB）" },
+            { "value": "2048", "label": "2 GB（缓存上限 512 MB）— 默认" },
+            { "value": "4096", "label": "4 GB（缓存上限 512 MB）" },
+            { "value": "8192", "label": "8 GB（缓存上限 512 MB）" }
+          ],
+          "description": "单个站点的浏览器数据目录超过该值后，打开前会拦截并提示清理缓存（保留登录态）。0 = 不检查、不拦截。"
+        },
+        {
+          "key": "webapp.diskCacheMb",
+          "label": "磁盘 HTTP 缓存",
+          "type": "select",
+          "default": "-1",
+          "options": [
+            { "value": "-1", "label": "禁用磁盘 HTTP 缓存（默认，最省磁盘）" },
+            { "value": "0", "label": "不限制（Chrome 默认）" },
+            { "value": "128", "label": "128 MB（仅单条准入阈值，不限总量）" },
+            { "value": "512", "label": "512 MB（仅单条准入阈值，不限总量）" },
+            { "value": "1024", "label": "1 GB（仅单条准入阈值，不限总量）" }
+          ],
+          "description": "禁用后每次打开站点都要重新下载静态资源（更慢、但磁盘不涨）；正数档位经实测**只限制单条资源的准入大小、不限制缓存总量**。这与上面的“单站点数据上限”不是一回事。"
+        }
+      ]
+    }
+  }
+}

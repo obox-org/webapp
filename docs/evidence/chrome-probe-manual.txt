@@ -1,0 +1,34 @@
+# 手工真机验收记录：Chrome 未安装 / 探测顺序（D-2 已接受覆盖缺口）
+#
+# 这两条分支没有自动化回归保护（本扩展不做"仅测试用"的探测注入）。
+# 执行步骤见 README §5「手工验收」。执行后请把实际结果填在下面，保留原始命令输出。
+#
+# ── 基线（执行前填写）────────────────────────────────────────────
+# 日期 / 执行人：
+# Chrome 版本（(Get-Item 'C:\Program Files\Google\Chrome\Application\chrome.exe').VersionInfo.ProductVersion）：
+# 注册表基线（reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve）：
+#
+# ── 步骤 1：安装目录改名 → 应命中第 4 顺位（注册表）──────────────────
+# 命令：Rename-Item 'C:\Program Files\Google\Chrome\Application' 'C:\Program Files\Google\Chrome\Application.bak'
+# 预期：点「环境检查」/打开连接仍成功，来源显示为注册表（registry）
+# 实际结果：
+# 证据（命令输出）：
+#
+# ── 步骤 2：删除注册表键 → 应报 [chrome-not-found] ───────────────────
+# 命令：reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /f
+# 预期：报错文案**按序**列出查找过的四条路径，且**不回退 Edge**
+# 实际结果：
+# 证据（命令输出 / 界面文案原文）：
+#
+# ── 步骤 3：还原 ────────────────────────────────────────────────────
+# 命令：reg import <基线导出的 .reg> ; Rename-Item 'C:\Program Files\Google\Chrome\Application.bak' 'C:\Program Files\Google\Chrome\Application'
+#
+# ── 步骤 4：还原校验（四条都应通过）─────────────────────────────────
+# 1) 安装目录存在 = True：
+# 2) .bak 不存在 = True：
+# 3) 注册表键值与基线一致：
+# 4) chrome.exe 版本与基线一致：
+# 5) 手工打开一次日常 Chrome，确认自己的浏览数据未受影响：
+#
+# ── 结论 ────────────────────────────────────────────────────────────
+# [ ] 通过   [ ] 未通过（问题描述与后续动作）

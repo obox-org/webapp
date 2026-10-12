@@ -1,0 +1,9 @@
+# 依赖与构建产物不参与 prettier（node_modules/ 另有 prettier 默认忽略，这里显式写清）
+node_modules/
+out/
+ui/
+data/
+
+# 证据快照（docs/evidence/**）按字节原样保存：是当时产物 / DOM 转储的副本，
+# 用于复核"那一刻到底长什么样"，格式化它就等于毁掉证据 —— 不参与 prettier。
+docs/evidence/

@@ -1,0 +1,871 @@
+/*
+ * 远程桌面子应用样式（设计文档 §2 的 token 映射表 + §4 的表单结构）。
+ *
+ * 本文件**只消费宿主主题 token**，不写任何色彩与字体族字面量（R-D1 验收 2）：
+ * 颜色/字号/字体族一律引用宿主 token，只保留纯布局属性（间距、栅格、宽高、行高）。
+ *
+ * token 的来源不是"CSS 继承"（子窗口是 `app://` 跨源独立文档，自定义属性不跨文档继承），
+ * 而是宿主的 `obox-theme` 推送 + `src/theme.js` 的兜底表：两者都 `setProperty` 到本页
+ * `documentElement` 上，因此这里只写**裸**的 token 引用（**不写** `, fallback` 兜底字面量，
+ * 否则又变成自造色值）。兜底值集中在 `src/theme.js` 的 `FALLBACK_TOKENS`。
+ *
+ * 例外（§2.5 E1）：`--radius` / `--radius-lg` / `--label-w` 是扩展自有的**布局**变量
+ * （宿主 token 清单里没有圆角与栅格宽度）。
+ */
+
+:root {
+  --radius: 8px;
+  --radius-lg: 10px;
+  /*
+   * 表单两列栅格的**标签列固定宽度**（用户要求："选项名左对齐、固定长度；控件也左对齐，防止长度不一"）。
+   *
+   * 实测依据（无头 Chrome 直开 ui/ 副本，宿主字体栈 `-apple-system, …, 'Segoe UI',
+   * 'Microsoft YaHei', 'PingFang SC', sans-serif`，裸机中英混排实测，见
+   * docs/evidence/align-measure/label-w-measure.txt）：
+   *   - 65 个字段里最长的标签是「全屏时占满当前显示器」（maximizeToCurrentDisplays，9 个全角字）
+   *     ⇒ 12px（= --font-size-sm）下**实测 120.0px**；强制 `Microsoft YaHei` 或等宽字体同样是
+   *     120.0px（该值不随本机字体栈变化）。次长：「网关与主机共用凭据」108.0px、
+   *     「NLA（网络级认证）」106.7–108.7px、「展开工作目录变量」96.0px。
+   *   - 为抗"宿主换一套更宽的字体"这种漂移，取**字体上界估算**（全角 1.15em / 其余 0.8em，
+   *     与 test/formAlign.test.js 同一套口径）作预算：最长标签 138.0px。
+   *   - 标签列 = 上界 138 + 6px 余量 ⇒ **144px**（12 个全角字宽）。该口径把"标签不折行"钉成
+   *     机器可判的断言（改 fields.js 里出现更长的标签会直接变红）。
+   *   - 1280 宽窗口下：模态框 640 - 左右各 20 padding = 600；高级区再扣各 12 padding ⇒ 行宽 576
+   *     ⇒ 控件列 576 - 144(标签) - 8(间距) = **424px**；最长的控件内容是下拉框选项文本
+   *     「3 — RemoteApp 会话交给远程」实测 176.6px（外加 select 自身箭头/内边距）⇒ 富余充足，不折行。
+   */
+  --label-w: 144px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid var(--bg);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--hover-bg);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--bg);
+}
+
+/* ---------- 骨架 ---------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app__header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex: 0 0 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.app__title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+/* 右上动作区：清理全部缓存 + 新建 */
+.app__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app__heading {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.badge {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sidebar);
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.app__content {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.app__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  padding: 20px;
+}
+
+.app__loading {
+  padding: 20px;
+  color: var(--fg-dim);
+}
+
+.alert {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--font-size-sm);
+  word-break: break-all;
+}
+
+.alert--error {
+  border-color: var(--fg-error);
+  /* color-mix 的等价 fallback（§11.2 R4）：老引擎不支持时退化为"无底色"，不丢可读性 */
+  background: transparent;
+  background: color-mix(in srgb, var(--fg-error) 8%, transparent);
+  color: var(--fg-error);
+}
+
+@media (max-width: 720px) {
+  .app__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--font-size);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  /* hover 的反馈交给底色，不再自造描边色（§2.3 #41） */
+  border-color: transparent;
+  background: var(--hover-bg);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--fg-bright);
+}
+
+.btn--primary:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) 85%, var(--fg-bright));
+}
+
+/* 危险按钮改为**描边式**（§2.5 E4）：--fg-error 在深色主题是亮红，白字压其上对比度不足 */
+.btn--danger {
+  border-color: var(--fg-error);
+  background: transparent;
+  color: var(--fg-error);
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--fg-error);
+  background: transparent;
+  background: color-mix(in srgb, var(--fg-error) 15%, transparent);
+}
+
+.btn:focus-visible,
+.input:focus-visible,
+.select:focus-visible,
+.dot:focus-visible,
+.statusbar__toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* ---------- 卡片 ---------- */
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+/* 标题行：名称（单行省略）+ 右侧 TLS 标记（R15） */
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card__title {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 宿主 token 清单里没有等宽字体，改用宿主字体族 */
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* TLS 降级标记（R15）：只消费 token，不写任何色值字面量 */
+.tls-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--fg-warning);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--fg-warning) 8%, transparent);
+  color: var(--fg-warning);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* 网址行：单行省略（超长 URL 不撑破卡片） */
+.card__url {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 体积行：按需查询后才有内容（R17 要求"不做常驻轮询"） */
+.card__size {
+  margin: 0;
+  min-height: 16px;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+}
+
+.card__subtitle {
+  margin: 0;
+  min-height: 16px;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.card__error {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--fg-error);
+  border-radius: var(--radius);
+  background: transparent;
+  background: color-mix(in srgb, var(--fg-error) 8%, transparent);
+  color: var(--fg-error);
+  font-size: var(--font-size-sm);
+  word-break: break-all;
+}
+
+.dot {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--border);
+  cursor: pointer;
+}
+
+.dot--opening {
+  background: var(--accent);
+  animation: dot-pulse 1s ease-in-out infinite;
+}
+
+.dot--ok {
+  background: var(--fg-success);
+  cursor: default;
+}
+
+.dot--error {
+  background: var(--fg-error);
+}
+
+@keyframes dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+
+/* ---------- 空态 ---------- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 320px;
+  height: 100%;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.empty__icon {
+  margin-bottom: 8px;
+  color: var(--fg-dim);
+}
+
+.empty__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.empty__hint {
+  margin: 0 0 12px;
+  color: var(--fg-dim);
+  font-size: var(--font-size);
+}
+
+/* ---------- 状态栏 ---------- */
+
+.statusbar {
+  flex: 0 0 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px;
+  border-top: 1px solid var(--border);
+  background: var(--statusbar-bg);
+  color: var(--statusbar-fg);
+  font-size: var(--font-size-sm);
+}
+
+.statusbar--collapsed {
+  flex-basis: 24px;
+  height: 24px;
+  padding: 0 12px;
+}
+
+.statusbar__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.statusbar__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.statusbar--ok .statusbar__text {
+  color: var(--fg-success);
+}
+
+.statusbar--error .statusbar__text {
+  color: var(--fg-error);
+}
+
+/* ---------- 模态框 ---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* 遮罩由 --bg 派生（§2.5 E5）：深色主题下压暗、浅色主题下压浅，都不写死黑色 */
+  background: transparent;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 640px;
+  max-width: 100%;
+  max-height: 80vh;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px transparent;
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 45%, transparent);
+}
+
+.modal--sm {
+  width: 420px;
+}
+
+.modal__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.modal__close {
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: var(--font-size-lg);
+  cursor: pointer;
+}
+
+.modal__close:hover {
+  color: var(--fg);
+}
+
+.modal__body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 16px 20px;
+  /* 兜底：任何长内容（长 host / 长下拉项 / 长说明）都不得撑出横向滚动条 */
+  overflow-wrap: anywhere;
+}
+
+.modal__footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.modal__text {
+  margin: 0 0 8px;
+  font-size: var(--font-size);
+}
+
+.modal__hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+}
+
+@media (max-width: 720px) {
+  .modal {
+    width: calc(100% - 32px);
+  }
+
+  .modal--sm {
+    width: calc(100% - 32px);
+  }
+}
+
+/* ---------- 表单 ---------- */
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group__title {
+  margin: 0 0 8px;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* 单列纵向：每个选项**独占一行**（§4.2 不再使用多列栅格挤压布局；窄屏靠 .field 的单列降级） */
+.form-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/*
+ * 每个字段**独占一行**（§4.2 单列纵向；不再用多列栅格挤压字段本身），
+ * 但**行内是两列栅格**：标签列固定 `--label-w` + 控件列吃剩余（用户要求"选项名左对齐、固定长度，
+ * 控件也左对齐"）。
+ *
+ * 为什么用 `display: grid` 而不是 flex + `flex: 0 0 var(--label-w)`：
+ *   ① 两列栅格的列边界由**容器**定义，与"这一行放了什么元素"无关 ⇒ 任何新增/缺失元素都不会
+ *      让某行的控件起点飘移；flex 的固定 basis 只能管住标签自己，控件起点仍取决于行内元素与 gap
+ *      的相互作用（一旦某行少一个元素就得靠占位元素补，属于"结构决定对齐"）。
+ *   ② 说明行与错误行必须是"控件列内的第二行"、且标签列留空 ⇒ 用 `grid-column: 2` 直接表达，
+ *      不需要给每个字段塞一个空标签元素（flex 下要靠 `margin-left: var(--label-w)` 硬凑，
+ *      窄窗口降级时还得再撤掉那段 margin，容易漏改）。
+ *   ③ 列宽可以在**同一处**（`:root` 的 `--label-w` 与下面的 `grid-template-columns`）改动，
+ *      窄窗口降级只需把模板换成单列。
+ *   `minmax(0, 1fr)` 而非 `1fr`：栅格项默认 `min-width: auto`，长内容（长 url / 长下拉项）会把
+ *   控件列撑宽并引发横向溢出；`minmax(0, …)` 允许它收缩到 0，溢出交给控件自身处理。
+ *
+ * ⚠️ `.field` 是**唯一**的栅格容器：标签、控件、说明、红字全是它的直接子元素。
+ * 曾经把"标签 + 控件"再包一层 `.field__row` 做嵌套栅格，结果那一层被外层栅格当成"第 1 列的
+ * 栅格项"⇒ 它的宽度只有 `--label-w`(144px)，内层第二列（控件列）直接塌成 0（实测
+ * `grid-template-columns: 144px 0px`，见 docs/evidence/align-shots/measure-common.txt）。
+ * 因此**不允许**再加回 `.field__row` 包裹：test/formAlign.test.js 的 A1⑦ 会拦。
+ */
+.field {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  align-items: start;
+  column-gap: 8px;
+  row-gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+
+/* 兼容：字段自带的"占满一行"标记；单列布局下恒成立 */
+.field--full {
+  grid-column: 1 / -1;
+}
+
+/* 标签列：固定宽 + **左对齐**（`justify-self: start` 让长短标签的起始 x 一律相同） */
+.field__label {
+  justify-self: start;
+  text-align: left;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  min-width: 0;
+}
+
+/* 控件列：统一从 `--label-w + 8px` 起，**左对齐**（所有控件类型的左边缘重合） */
+.field__control {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-self: stretch;
+  text-align: left;
+  min-width: 0;
+}
+
+/* 勾选框字段的标签列是**空占位**（方框与其它控件对齐到同一 x，见 ConnectionField.vue），
+   这里把空单元格压到 0 高，避免给该行多留一档 4px 行距 */
+.field__label--empty {
+  height: 0;
+}
+
+.field__required {
+  margin-left: 2px;
+  color: var(--fg-error);
+}
+
+/* 每项下方的**一行**灰色说明（R-D3 的落点）：`.field__hint` 是历史类名的别名，样式合并到同一条。
+   位置固定在**控件列**内（第 2 列 / 第 2 行），与控件的左边缘对齐；标签列留空不跨列。 */
+.field__desc,
+.field__hint {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  text-align: left;
+  min-width: 0;
+}
+
+.field__error {
+  grid-column: 2;
+  grid-row: 3;
+  margin: 0;
+  color: var(--fg-error);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  min-width: 0;
+}
+
+/* 勾选类字段的警示行（`ignoreCert` = TLS 降级）：落在控件列，用 warning token */
+.field__warn {
+  grid-column: 2;
+  grid-row: 4;
+  margin: 0;
+  color: var(--fg-warning);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  min-width: 0;
+}
+
+/* 多行文本（额外 origin）：跟着控件列的宽度，不撑破模态框 */
+.textarea {
+  resize: vertical;
+  font-family: var(--font-family);
+}
+
+/* 体积拦截模态框的三个数字 */
+.limit-list {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  color: var(--fg);
+  font-size: var(--font-size);
+}
+
+.limit-list li {
+  margin: 2px 0;
+}
+
+.input,
+.select {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--font-size);
+}
+
+.input::placeholder {
+  color: var(--fg-dim);
+}
+
+.input--error,
+.select--error {
+  border-color: var(--fg-error);
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-row .input {
+  flex: 1 1 auto;
+}
+
+.pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pair .input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.pair__sep {
+  color: var(--fg-dim);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  color: var(--fg);
+  font-size: var(--font-size);
+}
+
+.check input {
+  /* `flex: 0 0 14px`：标签文字长时不许把方框挤扁（min-width:auto 对替换元素不兜底） */
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/*
+ * ---------- 窄窗口降级 ----------
+ *
+ * 卡片窗口被拉窄时，两列栅格会挤压控件列（标签 144px 是固定的）⇒ 这里把**标签列与控件列改为
+ * 上下堆叠**：标签独占第一行、控件与说明从容器左边缘（同一 x）开始，`--label-w` 不再参与布局。
+ *
+ * 断点 520px 由"两列仍够用"反推（与 test/formAlign.test.js 的算式同源）：
+ *   最小视口 = --label-w(144) + 列间距(8) + 控件列下限(320) + .overlay 左右内边距(32)
+ *              + .modal__body 左右内边距(40) + .accordion__body 左右内边距(24) = 520px
+ * 控件列下限 320px 的依据：放得下最长下拉项「3 — RemoteApp 会话交给远程」（实测 176.6px，
+ * 外加 select 自身的箭头与内边距）以及成对字段的两格输入框 + 「×」分隔。
+ *
+ * 为什么用媒体查询而不是容器查询：本窗口是**整个扩展子窗口**（`#app` 占满 100vw），
+ * 模态框宽度由自身 `max-width: 100%` 决定，宿主侧的窗口宽度就是视口宽度 —— 媒体查询的
+ * 判据与"实际可用宽度"同源，且不需要给祖先元素加 `container-type`（那会额外引入
+ * containment 语义、影响 fixed 定位的遮罩）。容器查询留作后续在宿主内嵌场景下的升级。
+ *
+ * 降级后同样**不允许横向滚动或文字裁切**：标签与说明允许折行，`.field` 收成单列。
+ */
+@media (max-width: 520px) {
+  .field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .field__label {
+    justify-self: start;
+  }
+
+  /* 说明行与错误行回到唯一那一列的第 2 / 3 行（不改行号会让它们与控件挤在同一格） */
+  .field__desc,
+  .field__hint,
+  .field__error {
+    grid-column: 1;
+  }
+
+  /* 单列下勾选框字段不再有"空标签列"这一行 */
+  .field__label--empty {
+    display: none;
+  }
+}
+
+/* 最后一道兜底：任何长内容（长 host / 长下拉项 / 长说明）都不得撑出横向滚动条 */
+.modal__body {
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 折叠面板 ---------- */
+
+.accordion {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  /*
+   * ⚠️ 这里**必须**与 `.input/.select` 的背景（`--bg-input`）不同色：宿主默认 token 里
+   * `--bg-input` 与 `--border` 是同一个值（#3c3c3c），所以"容器与输入框同色"会让高级区里的
+   * 文本框**连框带边一起消失**（用户实测："高级选项里文本框基本上看不清"）。
+   * 现在取最深一档 `--bg`，与输入框形成 背景 → 凹槽 → 输入框 三层，`test/fallbackInputs.test.js`
+   * 会把这个"输入框不得与其容器同色"的性质钉住。
+   */
+  background: var(--bg);
+}
+
+.accordion__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--font-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.accordion__toggle:hover {
+  background: var(--hover-bg);
+}
+
+.accordion__body {
+  padding: 0 12px 12px;
+}
+
+/* 高级区底部的一句提醒（"同站点窗口开着时新设置一律不生效"） */
+.accordion__hint {
+  margin: 8px 0 0;
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
+  text-align: left;
+}
+
+/* ---------- spinner ---------- */
+
+/* 描边跟随所在按钮的文字色（§2.5 E7）：主按钮是 --fg-bright、危险按钮是 --fg-error */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
