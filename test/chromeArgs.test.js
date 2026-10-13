@@ -322,9 +322,66 @@ test('R17：--disk-cache-size 的三档语义（-1 禁用 / 0 不传 / 正数按
   assert.ok(buildChromeArgs(entry, { diskCacheMb: 999 }).includes('--disk-cache-size=-1'))
 })
 
-test('userDataDirArg：只产出相对路径形态 chrome/<净化名>', () => {
+test('userDataDirArg：缺省仍产出相对形态 chrome/<净化名>（1.0.2 行为一字不变）', () => {
   assert.equal(userDataDirArg('内网'), '--user-data-dir=chrome/内网')
   assert.equal(userDataDirArg('a<b'), '--user-data-dir=chrome/a-b')
+  assert.equal(userDataDirArg('内网', { rootMode: 'relative' }), '--user-data-dir=chrome/内网')
+  // 自定义根但根为空 ⇒ 退回相对形态（由助手侧的根校验兜底，界面绝不自己发明一个根）
+  assert.equal(userDataDirArg('内网', { rootMode: 'absolute' }), '--user-data-dir=chrome/内网')
+  assert.equal(
+    userDataDirArg('内网', { rootMode: 'absolute', root: '' }),
+    '--user-data-dir=chrome/内网'
+  )
+})
+
+test('userDataDirArg：rootMode=absolute 产出 <绝对根>\\<净化名>（规格 §9.2 末的 D2 裁定）', () => {
+  assert.equal(
+    userDataDirArg('内网', { rootMode: 'absolute', root: 'D:\\obox-webapp\\profiles' }),
+    '--user-data-dir=D:\\obox-webapp\\profiles\\内网'
+  )
+  // 尾部分隔符被规范化（不会产出双反斜杠）
+  assert.equal(
+    userDataDirArg('内网', { rootMode: 'absolute', root: 'D:\\obox-webapp\\profiles\\' }),
+    '--user-data-dir=D:\\obox-webapp\\profiles\\内网'
+  )
+  // UNC 根同样成立
+  assert.equal(
+    userDataDirArg('内网', { rootMode: 'absolute', root: '\\\\server\\share\\profiles' }),
+    '--user-data-dir=\\\\server\\share\\profiles\\内网'
+  )
+  // 名称仍然净化（非法字符 → `-`）
+  assert.equal(
+    userDataDirArg('a<b', { rootMode: 'absolute', root: 'D:\\p' }),
+    '--user-data-dir=D:\\p\\a-b'
+  )
+})
+
+test('buildChromeArgs：absolute 模式把根写进参数；根非法 ⇒ 字段级错误而非静默回落', () => {
+  const entry = normalizeWebapp({ name: 'A', url: 'https://a/', ignoreCert: false })
+  const withRoot = buildChromeArgs(entry, {
+    rootMode: 'absolute',
+    root: 'D:\\obox-webapp\\profiles'
+  })
+  assert.ok(
+    withRoot.includes('--user-data-dir=D:\\obox-webapp\\profiles\\A'),
+    `absolute 模式必须产出绝对形态：${JSON.stringify(withRoot)}`
+  )
+  // 默认（不传 rootMode）仍然是相对形态 —— 这条是"默认根零回归"在纯函数层的守卫
+  assert.ok(buildChromeArgs(entry).includes('--user-data-dir=chrome/A'))
+  // absolute 模式但根为空/非法 ⇒ 抛字段级错误（**不得**悄悄落到默认根）
+  assert.deepEqual(errorsOf({ name: 'A', url: 'https://a/' }, { rootMode: 'absolute', root: '' }), [
+    { field: 'profileRoot', message: '自定义根必须是绝对路径' }
+  ])
+})
+
+test('describeLaunch：自定义根下摘要里带绝对路径（日志更有用，且仍不打印完整命令行）', () => {
+  const args = argsOf(
+    { name: 'A', url: 'https://a/', ignoreCert: false },
+    { rootMode: 'absolute', root: 'D:\\obox-webapp\\profiles' }
+  )
+  const text = describeLaunch({ args })
+  assert.match(text, /profile=D:\\obox-webapp\\profiles\\A/)
+  assert.ok(!text.includes('--disable-features'), '摘要不得包含完整命令行')
 })
 
 test('validateWhitelistFields：空条目不报错，非法才报', () => {

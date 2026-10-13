@@ -544,6 +544,9 @@ node skills/obox-ext-dev/scripts/validate-manifest.mjs extensions/webapp/manifes
 3. 其余每一项的去参数名前缀（到第一个 `=` 为止）必须落在固定集合内：
    `--user-data-dir`、`--disable-features`、`--ignore-certificate-errors`、`--unsafely-treat-insecure-origin-as-secure`、`--window-size`、`--window-position`、`--start-maximized`、`--lang`、`--force-device-scale-factor`、`--disable-gpu`、**`--disk-cache-size`**（R17）。
 4. `--user-data-dir=` 的值必须是**相对路径**（相对于助手 cwd），只允许单层目录名 `chrome/<净化名>`，禁止 `..`、盘符、绝对路径（助手只允许操作自己的 profile 根）。
+
+> ⚠️ **本条已被 [amendment 08](amendments/08-profile-root.md) 取代（1.0.3）**：自定义根下**允许**「绝对路径且恰好等于 `<生效根>/<单层名>`」的形态；相对形态分支保留。**不变的是**「助手只允许操作生效根之内的子目录」与「禁止 `..`」。
+
 5. **`--disk-cache-size=` 的值必须是纯十进制正整数**（`/^\d+$/`），且 `1 ≤ n ≤ 17179869184`（16 GB）；不满足 → `-32602`。
 6. 不允许出现 `--`、`--remote-debugging-port`、`--load-extension`、`--proxy-server`、任一参数出现两次等。
 
@@ -885,6 +888,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS webapp_name_nocase ON webapp (name COLLATE NOC
 
 ### 14.2 创建与改名移动（R4）
 
+> ⚠️ **已由 [amendment 08](amendments/08-profile-root.md) 修订（1.0.3）**：新增「迁移期间禁止改名」、「根迁移 intent 在扩展 data 目录（`.pending-move-root.json`）」与「先改根、后改名」的顺序。
+
 **创建**：`save` 新建条目不创建目录。目录由 Chrome 自己在首次 `--user-data-dir` 时创建（R7 边界场景 7）。`profileDir` 列在建库时写入净化后的目录名，使其成为"意定目录名"。
 
 **改名（`name` 变化）的确定性顺序**——这是"移动失败则报错且不改数据"（R4）的落点：
@@ -913,6 +918,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS webapp_name_nocase ON webapp (name COLLATE NOC
 > 这条机制存在的理由：`fs.rename` 与 `db.update` 之间没有事务（`api.sqlite` 不暴露跨进程事务，且目录操作在助手进程）。没有它，"移动成功 + 落库失败"会让 `name` 与目录长期不一致。
 
 ### 14.3 删除（R13）
+
+> ⚠️ **已由 [amendment 08](amendments/08-profile-root.md) 修订（1.0.3）**：第 **0** 步新增「自定义根缺标记 `.obox-webapp-root` ⇒ 拒绝，不执行任何 rename/rm」；其余步骤不变。**改名**同样带这道门禁（改名会移动数据）。
 
 ```
 1. 预检：helper profileStatus({ name: row.profileDir })
@@ -951,6 +958,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS webapp_name_nocase ON webapp (name COLLATE NOC
 5. 单测无法可靠复现"Chrome 占用"（纯 Node 下很难造 `FILE_SHARE_NONE` 的独占句柄）→ 因此 §18.2 用**只读文件 + 只读目录属性**覆盖"删除失败 → `[profile-busy]` 归一"这条路径，真实占用由真机 A12 覆盖
 
 ### 14.5 只清缓存（R17）——可清理白名单与"必须保留"清单
+
+> ⚠️ **已由 [amendment 08](amendments/08-profile-root.md) 修订（1.0.3）**：新增第 **0** 道防线「自定义根缺标记 ⇒ 整体拒绝（返回 `refused`，**不抛错**）」；白名单 / 保留清单 / 深度判定**逐项不变**。
 
 **这是 R17 里唯一会删除数据的动作，因此用白名单 + 显式保留清单双写。**
 
@@ -1056,6 +1065,8 @@ Extensions  Local Extension Settings  Sync Data  Network
 - 「体积」文案统一用**人类可读格式**（`formatBytes`：B / KB / MB / GB，保留 1–2 位小数），上限展示同格式
 
 ### 14.4 卸载行为（R2 / P2 —— 见 D-1）
+
+> ⚠️ **本条已被 [amendment 08](amendments/08-profile-root.md) 取代（限定范围，1.0.3）**：卸载 = 永久删除**默认根**（`<扩展 data>/chrome`）下的数据；**外部根**（`webapp.profileRoot` 指向的绝对路径）下的 profile **保留在磁盘上，需用户自行清理**。本节 (a) 的「全部站点浏览器数据永久消失」表述改为**对照式**；(g-1) 的 `install` 禁令**加强**（新增「不得触碰外部根」）。
 
 **架构硬事实（决定了 P2 不可能有"保留数据"的实现）**：
 
@@ -1265,10 +1276,14 @@ Test-Path "$dst\data\webapp.db"; Test-Path "$dst\data\chrome"
    3b. **"已知行为"说明（真机已核实，必须写进 README 与界面 `title`）**：Chrome 的单例机制决定——**同站点窗口已开着时，新设置的窗口尺寸/位置/语言/缩放不会生效**（新进程会把请求转交给已有实例，并忽略自身参数）。因此"改了设置没生效"的标准处置是：**先关闭该站点的窗口，再重新打开**。这句话要同时出现在：① 状态栏成功文案后缀；② 「高级选项」折叠区的说明行；③ README 的「已知行为」小节。
 4. **首次打开提示**（可选、非必须）：若 `profileInfo.exists === false`，`open` 成功文案后缀 `（首次打开会初始化浏览器数据目录，可能稍慢）`
 5. **数据体积提示（R17 改写）**：
-   - 条目卡片的 `title`（悬浮）里带 `数据目录：<相对路径>`；**不再**只说"体积可能 GB 级"，而是给可操作的入口
-   - 每张卡片有一个**「查看体积」**动作（小按钮或可点击的占位文本）→ 调 `profileSize({ id })` → 就地显示 `已用 1.24 GB / 上限 2 GB`（超限时该行用 `--fg-warning`）
-   - **不做常驻轮询、不在 `list` 时自动扫盘**（§14.6）
-   - 上限为 `0`（不限制）时，体积行只显示 `已用 1.24 GB`，不带"上限"部分
+
+> ⚠️ **已由 [amendment 08](amendments/08-profile-root.md) 修订（1.0.3）**：条目卡片的悬浮 `title` 改为按**生效根**渲染——默认根显示 `chrome/<名>`，自定义根显示 `<根>\<名>`（根过长时中间省略，保留盘符与末两级）。
+
+- 条目卡片的 `title`（悬浮）里带 `数据目录：<相对路径>`；**不再**只说"体积可能 GB 级"，而是给可操作的入口
+- 每张卡片有一个**「查看体积」**动作（小按钮或可点击的占位文本）→ 调 `profileSize({ id })` → 就地显示 `已用 1.24 GB / 上限 2 GB`（超限时该行用 `--fg-warning`）
+- **不做常驻轮询、不在 `list` 时自动扫盘**（§14.6）
+- 上限为 `0`（不限制）时，体积行只显示 `已用 1.24 GB`，不带"上限"部分
+
 6. **体积超限拦截模态框（R17，必须存在）**
    - 触发：`open` 返回 `data.overLimit === true`（§11.1 / §14.6 第 5 步）
    - 标题：`「<name>」的数据目录已超过上限`
@@ -1304,18 +1319,18 @@ Test-Path "$dst\data\webapp.db"; Test-Path "$dst\data\chrome"
 
 ## 17. 性能与规模约束
 
-| 约束                    | 规格                                                                                                                                                                                                                                                                 |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 条数                    | 目标 ≤ 50 条（远超实际使用）。`list` 一次 `get_all()`，无分页（照搬 `rdp`）                                                                                                                                                                                          |
-| 扩展激活开销            | **懒**：不在激活时连通道、不开库、不探测 Chrome。首次用户操作才触发（照搬 `extensions/rdp/index.js:137-152` 的懒连接）                                                                                                                                               |
-| `open` 延迟             | 探测（10–30ms）+ spawn（< 50ms）+ Chrome 自身冷启动（1–10s，与 profile 体积相关）。扩展侧不做任何同步阻塞                                                                                                                                                            |
-| profile 体积            | 单站点可达 GB 级（R-5）。`removeProfile` 的超时给到 300s；`.trash` 残留清理放在激活后的懒执行，不阻塞界面                                                                                                                                                            |
-| 磁盘位置                | profile 落在 `%APPDATA%`（通常在 C: 盘）→ README 必须说明"多站点长期使用会占用大量 C 盘空间"，并给出"手动搬迁"的说明（**不做**界面内的搬迁功能）。**R17 补一句**：界面提供"体积上限 + 预检拦截 + 只清缓存"作为**节流**（缓存上限 ≠ 目录上限，见 §12.1）              |
-| **体积扫描成本（R17）** | 递归 `readdir` + `stat`；GB 级 / 数万文件在机械盘可能 10–60s。约束：① **只**在「打开」前预检与用户点「查看体积」时扫描；② 助手侧 **60s TTL 内存缓存**（§14.6）；③ **绝不常驻轮询**；④ `profileSize` 超时给 120s；⑤ 扫描期间界面给"正在统计大小…"反馈，不阻塞列表渲染 |
-| **清理成本（R17）**     | 「清理全部缓存」要遍历所有条目 × 各自的缓存目录；`cleanCaches` 超时 300s。逐目录删除，天然可中断（中断只是少清了几个目录，不影响一致性）                                                                                                                             |
-| 并发                    | 同一 profile 被重复启动 = Chrome 的并入语义（R12），不算错误。扩展侧对同一 id 的并发 `open` 不做去重（Chrome 自己会并入）                                                                                                                                            |
-| 消息体积                | 单条 `api.ipc` 消息上限 8MB（`src/main/ipcCore.ts:22-23`）；`launch` 的 args 数组 < 2KB，完全够                                                                                                                                                                      |
-| DB 体积                 | 50 条 × 约 15 列 ≈ 数十 KB，无索引/查询优化需求（唯一索引已建）                                                                                                                                                                                                      |
+| 约束                    | 规格                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 条数                    | 目标 ≤ 50 条（远超实际使用）。`list` 一次 `get_all()`，无分页（照搬 `rdp`）                                                                                                                                                                                                                                                                                                                         |
+| 扩展激活开销            | **懒**：不在激活时连通道、不开库、不探测 Chrome。首次用户操作才触发（照搬 `extensions/rdp/index.js:137-152` 的懒连接）                                                                                                                                                                                                                                                                              |
+| `open` 延迟             | 探测（10–30ms）+ spawn（< 50ms）+ Chrome 自身冷启动（1–10s，与 profile 体积相关）。扩展侧不做任何同步阻塞                                                                                                                                                                                                                                                                                           |
+| profile 体积            | 单站点可达 GB 级（R-5）。`removeProfile` 的超时给到 300s；`.trash` 残留清理放在激活后的懒执行，不阻塞界面                                                                                                                                                                                                                                                                                           |
+| 磁盘位置                | profile 落在 `%APPDATA%`（通常在 C: 盘）→ README 必须说明「多站点长期使用会占用大量 C 盘空间」，并说明**可在设置里改到其它盘**（1.0.3 起：`webapp.profileRoot` + 改根自动迁移；见 [amendment 08](amendments/08-profile-root.md)）。~~**不做**界面内的搬迁功能~~ → **已被 amendment 08 取代**。**R17 补一句**：界面提供"体积上限 + 预检拦截 + 只清缓存"作为**节流**（缓存上限 ≠ 目录上限，见 §12.1） |
+| **体积扫描成本（R17）** | 递归 `readdir` + `stat`；GB 级 / 数万文件在机械盘可能 10–60s。约束：① **只**在「打开」前预检与用户点「查看体积」时扫描；② 助手侧 **60s TTL 内存缓存**（§14.6）；③ **绝不常驻轮询**；④ `profileSize` 超时给 120s；⑤ 扫描期间界面给"正在统计大小…"反馈，不阻塞列表渲染                                                                                                                                |
+| **清理成本（R17）**     | 「清理全部缓存」要遍历所有条目 × 各自的缓存目录；`cleanCaches` 超时 300s。逐目录删除，天然可中断（中断只是少清了几个目录，不影响一致性）                                                                                                                                                                                                                                                            |
+| 并发                    | 同一 profile 被重复启动 = Chrome 的并入语义（R12），不算错误。扩展侧对同一 id 的并发 `open` 不做去重（Chrome 自己会并入）                                                                                                                                                                                                                                                                           |
+| 消息体积                | 单条 `api.ipc` 消息上限 8MB（`src/main/ipcCore.ts:22-23`）；`launch` 的 args 数组 < 2KB，完全够                                                                                                                                                                                                                                                                                                     |
+| DB 体积                 | 50 条 × 约 15 列 ≈ 数十 KB，无索引/查询优化需求（唯一索引已建）                                                                                                                                                                                                                                                                                                                                     |
 
 ## 18. 测试计划
 
@@ -1421,7 +1436,7 @@ Test-Path "$dst\data\webapp.db"; Test-Path "$dst\data\chrome"
 | `removeProfile` 占用（模拟：对目录内文件开 `r+` 句柄后再改名） | 抛错，message 含 `[profile-busy]`；目录仍在（或已进 `.trash`）                                                                                                                                                                                                      |
 | **`profileStatus.locked` 的 `lockfile` 探测（真机结论落点）**  | 造 `<dir>/lockfile` 且**不**持句柄 → `locked: false`；造一个**被独占打开**的 `lockfile`（Windows 上用 `FILE_SHARE_NONE` 打开，若造不出来则本用例标 `skip` 并注明）→ `locked: true`；**`lockfile` 不存在** → `locked: false`（且不抛错）                             |
 | **删除失败的错误归一（真实信息文案）**                         | 把 profile 目录设为**只读**或目录内放只读文件 → `removeProfile`/`moveProfile` 失败 → 归一为 `[profile-busy]`，message 含**"文件被占用（通常是该站点的 Chrome 窗口正开着）"**；**断言 message 里不出现 `SingletonLock` 字样**（该文件在 Windows 上不存在，见 §14.3） |
-| 路径防护                                                       | `chrome/../x`、`chrome/a/b`、绝对路径、盘符 → 全部 `-32602`                                                                                                                                                                                                         |
+| 路径防护                                                       | `chrome/../x`、`chrome/a/b`、盘符 → 全部 `-32602`；**绝对路径不再一律 `-32602`**（1.0.3 起：恰好等于 `join(生效根, 单层名)` 的绝对路径被接受，见 [amendment 08](amendments/08-profile-root.md)）                                                                    |
 | `.trash` 清理                                                  | 造两个残留 → 激活期清理函数只删"旧会话"的，不删本会话刚写的                                                                                                                                                                                                         |
 
 **`test/helperCache.test.js`（R17，最关键的"只删缓存"门禁）**
@@ -1888,8 +1903,8 @@ log     181387d feat: RDP 远程桌面扩展 1.0.0 首个开源版本   （单�
 | S6 | `extraOrigins` 的分隔符 | 换行（界面 textarea），拼参数时转英文逗号 | 用户书写友好 + Chrome 要求逗号 |
 | S7 | 名称唯一性 | 应用层 trim + 大小写不敏感查重 **+** 库层 `COLLATE NOCASE` 唯一索引 | 双层：文案可控 + 结构兜底 |
 | S8 | 删除的中转区 | `chrome/.trash/<ts>-<name>` | 让"半删"限制在非条目目录内 |
-| S9 | 改名的两阶段 intent | `chrome/.pending-move.json` | 无事务可用时的对账手段 |
-| S10 | helper 的 profile 路径形态 | 扩展侧只生成相对 `chrome/<名>`；助手解析为绝对路径 | 保持 `buildChromeArgs` 纯函数 |
+| S9 | 改名的两阶段 intent | `chrome/.pending-move.json`（另见 amendment 08：**根迁移** intent 在扩展 data 目录 `.pending-move-root.json`） | 无事务可用时的对账手段 |
+| S10 | helper 的 profile 路径形态 | 默认根下只生成相对 `chrome/<名>`；**自定义根下生成绝对形态**（amendment 08）；助手两种都收并解析/复核 | 保持 `buildChromeArgs` 纯函数 |
 | S11 | 是否用 `api.fs` | **不用**（profile 是二进制大目录，`api.fs` 只有文本读写与递归删除、且无 rename） | 全部目录操作放助手 |
 | S12 | 界面语言 | 只中文 | 与 `rdp` 一致；用户扩展 `titleKey` 无效 |
 | S13 | 是否提供"默认浏览器打开" | 不提供 | P3 初拟不做，本规格按不做写 |

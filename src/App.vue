@@ -20,6 +20,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import WebappCard from './components/WebappCard.vue'
 import WebappModal from './components/WebappModal.vue'
 import DeleteConfirm from './components/DeleteConfirm.vue'
+import ConfirmOverwrite from './components/ConfirmOverwrite.vue'
 import OverLimitModal from './components/OverLimitModal.vue'
 import EmptyState from './components/EmptyState.vue'
 import { callExtension } from './bridge.js'
@@ -31,6 +32,90 @@ const OVER_LIMIT_PREFIX = '[profile-over-limit]'
 const rows = ref([])
 const loading = ref(true)
 const loadError = ref('')
+
+// ---- profile 根（规格 §8.2：状态行 / 未受管警示行 / 覆盖确认框 / 浏览…+降级） ----
+//
+// ⚠️ 界面纪律：这些是本界面**仅有的三处**例外（除它们之外一切文案只进控制台，
+// `docs/spec/amendments/05-remove-status-bar.md`）：
+// ① 迁移状态行（用户必须看到并决策「继续 / 放弃」）；
+// ② 未受管目录警示行（缺标记 ⇒ 删除与清理已被拒绝）；
+// ③ 覆盖确认框（P1 = B 的唯一闸门，必须用户显式点按钮）。
+/** `rootStatus` 的最近一次结果（挂载时调一次 + 迁移未完成时按按钮刷新，**绝不轮询**） */
+const rootInfo = ref(null)
+/** 手填路径（降级形态；「浏览…」不支持时露出来） */
+const manualRoot = ref('')
+/** 「浏览…」进行中 */
+const browseBusy = ref(false)
+/** 降级/失败提示（只在"支持不了"时出现，支持时不打扰用户） */
+const browseNote = ref('')
+/** 覆盖确认框（逐条列出将被覆盖的目录名；只能按钮关闭） */
+const confirmOpen = ref(false)
+const confirmNames = ref([])
+const confirmBusy = ref(false)
+/**
+ * 覆盖确认框的来源（**这两条路径不能合并**）：
+ * - `'start'`：由 `startRootMigration` 触发。此时**意图文件还没写**（闸门在写意图之前就返回了），
+ *   所以确认后必须**带着 names 重新调 `startRootMigration`**；
+ * - `'resolve'`：由续做路径（`resolveRootMigration` 回 `needsConfirm`）触发。此时意图文件已在，
+ *   确认走 `resolveRootMigration` 的 `confirm-overwrite`。
+ *
+ * ⚠️ 走错就是"点了按钮什么都没发生"：start 路径去调 resolve 时找不到意图文件，
+ * 扩展会回 `phase:'none'` 并静默结束。
+ */
+const confirmSource = ref('resolve')
+/** 触发确认的候选根（仅 `confirmSource === 'start'` 时使用） */
+const confirmRoot = ref('')
+
+/** 迁移摘要（界面读它渲染「已搬 X/Y」；null = 没有未完成的迁移） */
+const migration = computed(() => rootInfo.value?.migration ?? null)
+/** 未受管的根 ⇒ 必须显示警示行（R3） */
+const unmanaged = computed(() => rootInfo.value?.unmanaged === true)
+/** 配置值非法 ⇒ 显示原因（运行时仍用生效根） */
+const rootInvalid = computed(() => rootInfo.value?.invalid ?? null)
+/** 自定义根（非默认）时的绝对路径，用于迁移完成提示 */
+const effectiveRoot = computed(() => String(rootInfo.value?.effectiveRoot ?? ''))
+const isDefaultRoot = computed(() => rootInfo.value?.isDefault !== false)
+
+/** 迁移状态行文案（`已搬 X/Y`，有覆盖时追加 `覆盖 Z`） */
+const migrationText = computed(() => {
+  const data = migration.value
+  if (!data) return ''
+  const moved = Number(data.done ?? 0) + Number(data.overwritten ?? 0)
+  const parts = [`正在迁移浏览器数据：已搬 ${moved}/${Number(data.total ?? 0)}`]
+  if (Number(data.overwritten ?? 0) > 0) parts.push(`覆盖 ${Number(data.overwritten)}`)
+  if (Number(data.skipped ?? 0) > 0) parts.push(`跳过 ${Number(data.skipped)}`)
+  if (Number(data.failed ?? 0) > 0) parts.push(`失败 ${Number(data.failed)}`)
+  return parts.join('，')
+})
+
+/** 迁移完成后的对照提示（规格 §7.5：外部根不在扩展内，卸载不会删它） */
+const migratedNotice = computed(() => {
+  if (migration.value) return ''
+  if (isDefaultRoot.value || !effectiveRoot.value) return ''
+  return `数据已迁到 ${effectiveRoot.value}；该目录不在扩展内，卸载扩展时不会删除它`
+})
+
+/** 逐条清单（跳过/覆盖/失败；超过 5 条折叠成"等 N 项"） */
+const migrationItems = computed(() => {
+  const items = Array.isArray(migration.value?.items) ? migration.value.items : []
+  const listed = items.map((item) => {
+    const status = String(item?.status ?? '')
+    const label =
+      status === 'overwritten'
+        ? '覆盖'
+        : status === 'skipped'
+          ? '跳过'
+          : status === 'failed'
+            ? '失败'
+            : status === 'missing'
+              ? '缺失'
+              : '完成'
+    const reason = String(item?.reason ?? '')
+    return `${label}：${String(item?.name ?? '')}${reason ? `（${reason}）` : ''}`
+  })
+  if (listed.length <= 5) return listed
+  return [...listed.slice(0, 5), `等 ${listed.length - 5} 项`]
+})
 
 /** 模态框状态 */
 const modalOpen = ref(false)
@@ -122,7 +207,197 @@ async function load() {
   }
 }
 
+// ---- profile 根：状态查询 / 迁移 / 浏览（规格 §8.2） ----
+
+/**
+ * 读一次根状态（**只在挂载时调一次**，迁移未完成时用户按按钮再调；
+ * 绝不常驻轮询——与既有"体积按需查询"的纪律一致）。
+ */
+async function refreshRootStatus() {
+  try {
+    const data = await callExtension('rootStatus', {})
+    rootInfo.value = data ?? null
+    if (rootInfo.value?.invalid) {
+      setStatus(`根目录设置无效：${rootInfo.value.invalid.reason}`, 'error')
+    }
+  } catch (err) {
+    // 根状态读不到不该挡住列表：只记控制台
+    setStatus(`读取浏览器数据根状态失败：${messageOf(err)}`, 'error')
+  }
+}
+
+/** 迁移的「继续」（含覆盖已确认的情形） */
+async function continueMigration() {
+  confirmBusy.value = true
+  try {
+    const result = await callExtension('resolveRootMigration', { action: 'continue' })
+    if (result?.needsConfirm) {
+      confirmNames.value = Array.isArray(result.conflicts) ? result.conflicts : []
+      confirmSource.value = 'resolve'
+      confirmOpen.value = true
+      setStatus('迁移需要先确认覆盖目标目录里的同名数据', 'error')
+      return
+    }
+    setStatus(`迁移已继续：已搬 ${Number(result?.done ?? 0)}/${Number(result?.total ?? 0)}`, 'ok')
+    await refreshRootStatus()
+    await load()
+  } catch (err) {
+    setStatus(`继续迁移失败：${messageOf(err)}`, 'error')
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
+/**
+ * 迁移的「放弃」：只删意图并把设置值写回旧根，**已复制到目标根的数据保留**
+ * （规格 D12；文案里必须说清，否则用户会以为"放弃 = 目标被清空"）。
+ */
+async function abandonMigration() {
+  confirmBusy.value = true
+  try {
+    const result = await callExtension('resolveRootMigration', { action: 'abandon' })
+    setStatus(
+      `已放弃迁移（设置值已写回原目录）。已经复制到目标目录的数据保留在磁盘上，需你自行清理（已搬 ${Number(result?.done ?? 0)} 项）`,
+      'error'
+    )
+    await refreshRootStatus()
+    await load()
+  } catch (err) {
+    setStatus(`放弃迁移失败：${messageOf(err)}`, 'error')
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
+/**
+ * 用户点「覆盖并继续」：把**用户看过的那份清单**（`confirmNames`）回传，扩展写进意图后才允许动手
+ * —— 这是 P1 = B 的唯一闸门，**不得**由程序自行确认。
+ *
+ * 按来源分两条路（见 `confirmSource` 的注释）：
+ * - `'start'`：意图文件还没写 ⇒ 带 `names` 重新调 `startRootMigration`（`confirmOverwrite: true`）；
+ * - `'resolve'`：意图文件已在 ⇒ 调 `resolveRootMigration({ action: 'confirm-overwrite', names })`。
+ */
+async function confirmOverwrite() {
+  confirmBusy.value = true
+  try {
+    const names = [...confirmNames.value]
+    const result =
+      confirmSource.value === 'start'
+        ? await callExtension('startRootMigration', {
+            root: confirmRoot.value,
+            confirmOverwrite: true,
+            names
+          })
+        : await callExtension('resolveRootMigration', { action: 'confirm-overwrite', names })
+    confirmOpen.value = false
+    const moved = Number(result?.done ?? 0) + Number(result?.overwritten ?? 0)
+    setStatus(
+      `已确认覆盖并继续迁移：已搬 ${moved}/${Number(result?.total ?? 0)}` +
+        (result?.blocked ? `；${String(result.blocked)}` : ''),
+      result?.blocked ? 'error' : 'ok'
+    )
+    await refreshRootStatus()
+    await load()
+  } catch (err) {
+    setStatus(`覆盖迁移失败：${messageOf(err)}`, 'error')
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
+/** 取消覆盖 ⇒ 什么都不删（该条目留在"未确认覆盖"） */
+function cancelOverwrite() {
+  if (confirmBusy.value) return
+  confirmOpen.value = false
+  setStatus('已取消覆盖：目标目录里的数据一个字都没动', 'info')
+}
+
+/**
+ * 「浏览…」：调扩展入口的 `browseRootDir`（子窗口没有 `api`）。
+ *
+ * 三种结果都**不报错**：
+ * - `supported:true` + `candidate` ⇒ 填进手填输入框，由用户显式提交；
+ * - `supported:false` ⇒ 露出降级入口（手填），并显示诚实的提示文案；
+ * - `canceled:true` ⇒ 什么都不改。
+ */
+async function browseRoot() {
+  browseBusy.value = true
+  browseNote.value = ''
+  try {
+    const data = await callExtension('browseRootDir', {})
+    if (data?.canceled) {
+      setStatus('已取消选择目录，未改动任何值')
+      return
+    }
+    if (data?.note) browseNote.value = String(data.note)
+    if (data?.invalid?.reason) {
+      browseNote.value = String(data.invalid.reason)
+      setStatus(`所选目录不可用作根：${data.invalid.reason}`, 'error')
+      return
+    }
+    if (data?.candidate) {
+      manualRoot.value = String(data.candidate)
+      setStatus(
+        data.supported
+          ? `已选择目录：${data.candidate}（请确认后提交）`
+          : `宿主未支持目录选择，已把候选目录填入下方输入框（${data.candidate}）`,
+        data.supported ? 'ok' : 'error'
+      )
+      return
+    }
+    // 没有候选：把降级入口露出来（提示语已经在上面的 `note` 里）
+    setStatus('未能取得候选目录，请手工粘贴目录路径', 'error')
+  } catch (err) {
+    browseNote.value = `无法打开目录选择框（${messageOf(err)}）；请手工粘贴目录路径`
+    setStatus(browseNote.value, 'error')
+  } finally {
+    browseBusy.value = false
+  }
+}
+
+/** 手填路径的提交：走与设置页**同一个**入口（`startRootMigration`） */
+async function submitManualRoot() {
+  const value = String(manualRoot.value ?? '').trim()
+  if (!value) {
+    setStatus('请先填写或选择目录路径', 'error')
+    return
+  }
+  confirmBusy.value = true
+  try {
+    const data = await callExtension('startRootMigration', { root: value })
+    if (data?.needsConfirm) {
+      // 意图文件**还没写**（闸门在写意图之前就返回了）⇒ 记下来源与候选根，
+      // 用户点「覆盖并继续」时要带着 names 重新调 `startRootMigration`
+      confirmSource.value = 'start'
+      confirmRoot.value = value
+      confirmNames.value = Array.isArray(data.conflicts) ? data.conflicts : []
+      confirmOpen.value = true
+      setStatus('目标目录里已有同名数据，需要你先确认覆盖', 'error')
+      return
+    }
+    if (data?.started === false) {
+      setStatus(`未开始迁移：${String(data.reason ?? '无需迁移')}（设置已更新）`, 'ok')
+      manualRoot.value = ''
+      await refreshRootStatus()
+      await load()
+      return
+    }
+    setStatus(
+      `已开始迁移到 ${String(data?.to ?? '')}（共 ${Number(data?.total ?? 0)} 项）` +
+        (data?.blocked ? `；${String(data.blocked)}` : ''),
+      data?.blocked ? 'error' : 'ok'
+    )
+    await refreshRootStatus()
+    await load()
+  } catch (err) {
+    setStatus(messageOf(err), 'error')
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
 onMounted(() => {
+  void refreshRootStatus()
   void load()
 })
 
@@ -389,6 +664,71 @@ function formatBytes(bytes) {
     </header>
 
     <main class="app__main">
+      <!-- ① 迁移状态行（规格 §8.2）：**唯一的"必须让用户看到并决策"的界面元素**。
+           仅在确实有未完成的迁移时出现；`phase != done` 时给「继续」「放弃」。
+           三处例外分别落在下面三个分支里（迁移状态行 / 未受管警示行 / 覆盖确认框）。 -->
+      <div v-if="migration" class="rootbar rootbar--migrating">
+        <p class="rootbar__text">{{ migrationText }}</p>
+        <ul v-if="migrationItems.length" class="rootbar__items">
+          <li v-for="(line, index) in migrationItems" :key="index">{{ line }}</li>
+        </ul>
+        <div class="rootbar__actions">
+          <button type="button" class="btn" :disabled="confirmBusy" @click="continueMigration">
+            继续
+          </button>
+          <button
+            type="button"
+            class="btn btn--danger"
+            :disabled="confirmBusy"
+            @click="abandonMigration"
+          >
+            放弃
+          </button>
+        </div>
+        <p class="rootbar__hint">
+          「放弃」只停止迁移并把设置写回原目录；已经复制到目标目录的数据会保留，需你自行清理。
+        </p>
+      </div>
+      <div v-else-if="unmanaged" class="rootbar rootbar--warn">
+        <p class="rootbar__text">该目录不是本扩展管理的目录：删除与清理已被拒绝</p>
+        <p class="rootbar__hint">
+          根目录 {{ effectiveRoot }} 缺少标记文件 .obox-webapp-root。打开与查体积仍可用。
+        </p>
+      </div>
+      <p v-else-if="migratedNotice" class="rootbar rootbar--done">{{ migratedNotice }}</p>
+
+      <!-- 配置值非法：说明它现在不生效（运行时仍用生效根） -->
+      <p v-if="rootInvalid" class="rootbar rootbar--warn">
+        设置里的根目录不合法，当前仍用 {{ effectiveRoot || '默认目录' }}：{{ rootInvalid.reason }}
+      </p>
+
+      <!-- 「浏览…」：目录选择依赖宿主能力；老宿主/失败时**不报错**，退回手填 + 诚实提示 -->
+      <div class="rootbar rootbar--browse">
+        <div class="rootbar__actions">
+          <button type="button" class="btn" :disabled="browseBusy" @click="browseRoot">
+            {{ browseBusy ? '正在打开…' : '浏览…' }}
+          </button>
+          <span class="rootbar__hint">
+            当前数据目录：{{ effectiveRoot || '默认目录（扩展数据目录下的 chrome）' }}
+          </span>
+        </div>
+        <!-- 手填入口：**任何情况下**都可用（「浏览…」不支持时它就是主入口） -->
+        <div class="rootbar__field">
+          <input
+            v-model="manualRoot"
+            type="text"
+            class="input rootbar__input"
+            placeholder="浏览器数据根目录（绝对路径，例如 D:\obox-webapp\profiles）"
+            aria-label="浏览器数据根目录"
+            @keydown.enter="submitManualRoot"
+          />
+          <button type="button" class="btn" :disabled="confirmBusy" @click="submitManualRoot">
+            迁移到此目录
+          </button>
+        </div>
+        <p v-if="browseNote" class="rootbar__hint rootbar__hint--warn">{{ browseNote }}</p>
+      </div>
+
       <p v-if="loading" class="app__loading">正在加载…</p>
       <p v-else-if="loadError" class="alert alert--error">{{ loadError }}</p>
       <template v-else>
@@ -448,6 +788,7 @@ function formatBytes(bytes) {
             :state="openingId === row.id ? 'opening' : 'idle'"
             :size="sizeById[row.id] || null"
             :size-loading="sizeLoadingId === row.id"
+            :data-dir="row.dataDir || ''"
             @open="doOpen(row)"
             @edit="openEdit(row)"
             @delete="openDelete(row)"
@@ -475,6 +816,16 @@ function formatBytes(bytes) {
       :warning="deleteWarning"
       @close="closeDelete"
       @confirm="confirmDelete"
+    />
+
+    <!-- 覆盖确认框（P1 = B 的唯一闸门）：逐条列出将被覆盖的目录名，
+         只能按钮关闭；**没有**"备份目标"选项 -->
+    <ConfirmOverwrite
+      v-if="confirmOpen"
+      :names="confirmNames"
+      :submitting="confirmBusy"
+      @close="cancelOverwrite"
+      @confirm="confirmOverwrite"
     />
 
     <OverLimitModal

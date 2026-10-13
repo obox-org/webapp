@@ -8,8 +8,13 @@
  *   - 第 3 行：说明（单行灰字，`min-height` 保证空说明时行高一致）；
  *   - 动作行：打开 / 编辑 / 删除。
  *
- * 悬浮 `title` 里带数据目录提示（规格 §15.2 第 5 条）：**不在列表上显示实时体积**
- * （避免每次 list 都算目录大小；体积要用户显式点「体积」才查）。
+ * 悬浮 `title` 里带数据目录提示（规格 §15.2 第 5 条，**被本需求修订为按生效根动态渲染**）：
+ * 默认根显示相对形态 `chrome/<名>`；自定义根显示 `<根>\<名>`（根过长时中间省略）——
+ * **不在列表上显示实时体积**（避免每次 list 都算目录大小；体积要用户显式点「体积」才查）。
+ *
+ * ⚠️ **界面不做路径拼接**：`dataDir` 由扩展入口（`index.js`）用 `lib/profileRoot.mjs` 的
+ * 唯一实现算好后传进来。子窗口是浏览器环境，**不能** import `lib/*.mjs`
+ * （`node:path` 在那里不可用），若在组件里自己拼一份，就会出现"第二份根解析实现"。
  */
 import { computed } from 'vue'
 
@@ -20,7 +25,9 @@ const props = defineProps({
   /** 该条目已查到的体积（`{ bytes, limitBytes }`；未查过为 null） */
   size: { type: Object, default: null },
   /** 体积查询中 */
-  sizeLoading: { type: Boolean, default: false }
+  sizeLoading: { type: Boolean, default: false },
+  /** 数据目录文案（由扩展入口按**生效根**算好；缺省回落到默认根的相对形态） */
+  dataDir: { type: String, default: '' }
 })
 
 const emit = defineEmits(['open', 'edit', 'delete', 'size'])
@@ -34,7 +41,15 @@ const profileDir = computed(() => String(props.row?.profileDir || props.row?.nam
 /** TLS 降级标记：**仅** `ignoreCert === true` 时渲染（R15 的门禁断言此条件） */
 const tlsDegraded = computed(() => props.row?.ignoreCert === true)
 
-const cardTitle = computed(() => `数据目录：chrome/${profileDir.value}；体积可能达到 GB 级`)
+/**
+ * 数据目录提示（规格 §15.2 第 5 条的修订）：**按生效根动态渲染**。
+ *
+ * 文案由扩展入口算好（`dataDir` prop）以免在界面里出现第二份根解析实现；
+ * 缺省（老界面/未传）时回落到默认根的相对形态，保持 1.0.2 的文案不变。
+ */
+const dataDirText = computed(() => String(props.dataDir || '') || `chrome/${profileDir.value}`)
+
+const cardTitle = computed(() => `数据目录：${dataDirText.value}；体积可能达到 GB 级`)
 
 /** 体积展示（按需查询才有值；规格 §15.2 第 5 条） */
 const sizeText = computed(() => {

@@ -27,6 +27,7 @@ const DELETE = source('components/DeleteConfirm.vue')
 const FIELD = source('components/WebappField.vue')
 const CARD = source('components/WebappCard.vue')
 const LIMIT = source('components/OverLimitModal.vue')
+const OVERWRITE = source('components/ConfirmOverwrite.vue')
 const MAIN = source('main.js')
 const APP = source('App.vue')
 const STYLES = source('styles.css')
@@ -36,7 +37,9 @@ test('模态框只能按钮关闭：不得有遮罩点击关闭，也不得有 E
   for (const [name, src] of [
     ['WebappModal.vue', MODAL],
     ['DeleteConfirm.vue', DELETE],
-    ['OverLimitModal.vue', LIMIT]
+    ['OverLimitModal.vue', LIMIT],
+    // 覆盖确认框是**不可逆动作**的唯一闸门，关闭口径必须与上面三个完全一致
+    ['ConfirmOverwrite.vue', OVERWRITE]
   ]) {
     assert.ok(!src.includes('@mousedown.self'), `${name} 不得绑定遮罩点击关闭`)
     assert.ok(!src.includes('@click.self'), `${name} 不得绑定遮罩点击关闭`)
@@ -48,6 +51,8 @@ test('模态框只能按钮关闭：不得有遮罩点击关闭，也不得有 E
   assert.ok(DELETE.includes('@click="emit(\'close\')"'), '删除确认的「取消」必须还在')
   assert.ok(DELETE.includes('@click="emit(\'confirm\')"'), '删除确认的「删除」必须还在')
   assert.ok(LIMIT.includes('@click="emit(\'close\')"'), '拦截模态框的「取消」必须还在')
+  assert.ok(OVERWRITE.includes('@click="emit(\'close\')"'), '覆盖确认框的「取消」必须还在')
+  assert.ok(OVERWRITE.includes('@click="emit(\'confirm\')"'), '覆盖确认框的「覆盖并继续」必须还在')
 })
 
 test('删除确认文案必须写明"浏览器数据"与"不可恢复"', () => {
@@ -230,4 +235,135 @@ test('反向用例：源码里不得出现 SingletonLock（Windows 上不存在�
       )
     }
   }
+})
+
+// ---------------------------------------------------------------------------
+// v1.0.3：profile 根 / 迁移状态 / 覆盖确认 / 降级（规格 §8.2 / §14.4）
+// ---------------------------------------------------------------------------
+
+test('R25：界面有迁移状态行，且「继续」「放弃」两个按钮都在', () => {
+  assert.ok(APP.includes('rootbar--migrating'), '必须有迁移状态行的容器')
+  assert.ok(APP.includes('正在迁移浏览器数据：已搬'), '状态行文案必须含"已搬 X/Y"')
+  assert.ok(APP.includes('continueMigration'), '必须有「继续」')
+  assert.ok(APP.includes('abandonMigration'), '必须有「放弃」')
+  assert.ok(
+    APP.includes('已搬 ${moved}/${Number(data.total ?? 0)}'),
+    'X/Y 必须来自 rootStatus 的真实计数'
+  )
+  assert.ok(APP.includes("callExtension('rootStatus'"), '状态行必须由 rootStatus 驱动')
+})
+
+test('R25：迁移状态行在列表区**顶部**（搜索框之上），且不是常驻轮询', () => {
+  const statusAt = APP.indexOf('rootbar--migrating')
+  const searchAt = APP.indexOf('class="search"')
+  assert.ok(statusAt > 0 && searchAt > statusAt, '迁移状态行必须出现在搜索框之上（列表区顶部）')
+  // 不得出现定时器（"不做定时器、不做后台轮询"，规格 §9.4 触发点）
+  assert.ok(!/setInterval|setTimeout\(/.test(APP), '界面不得用定时器轮询根状态')
+  const mounted = APP.slice(APP.indexOf('onMounted('))
+  assert.ok(mounted.includes('refreshRootStatus'), '根状态只在挂载时查一次')
+})
+
+test('R25：覆盖确认框**逐条列出**冲突目录名，并写明"永久删除且无法恢复"', () => {
+  assert.ok(OVERWRITE.includes('v-for="name in names"'), '必须逐条渲染冲突目录名（不得折叠/截断）')
+  assert.ok(
+    OVERWRITE.includes('目标目录里已有的浏览器数据（含登录态）会被永久删除且无法恢复'),
+    '必须写明不可恢复'
+  )
+  assert.ok(
+    OVERWRITE.includes('有 {{ names.length }} 个站点在目标目录里已经有数据'),
+    '标题必须给出 N'
+  )
+  assert.ok(OVERWRITE.includes('覆盖并继续'), '危险按钮文案必须是「覆盖并继续」')
+  assert.ok(OVERWRITE.includes('btn--danger'), '覆盖按钮必须是危险样式')
+  // P1 = B：**不做**"备份目标"选项
+  assert.ok(
+    !/备份/.test(OVERWRITE.replace(/不[会做].*备份|不会为.*保留备份/g, '')),
+    '覆盖确认框不得提供"备份"选项'
+  )
+  // 只有按钮能关（上面那条门禁已覆盖），且确认必须走扩展入口
+  assert.ok(APP.includes("action: 'confirm-overwrite'"), '确认必须写回意图文件后才允许动手')
+  assert.ok(APP.includes('confirmNames'), '界面必须把用户看过的清单回传')
+})
+
+test('R25：覆盖确认在两条来源下都能真的推进（防"点了按钮什么都没发生"）', () => {
+  // 两条来源不能合并：
+  // - `start`：用户在手填/「浏览…」提交时发现冲突 ⇒ 此时**意图文件还没写**（闸门在写意图之前返回），
+  //   点「覆盖并继续」必须带 names 重新调 `startRootMigration`；
+  // - `resolve`：续做路径（`resolveRootMigration` 回 needsConfirm）⇒ 意图文件已在，走 confirm-overwrite。
+  assert.ok(APP.includes("confirmSource.value = 'start'"), '必须记下确认框来源是 start')
+  assert.ok(APP.includes("confirmSource.value = 'resolve'"), '必须记下确认框来源是 resolve')
+  assert.ok(APP.includes('confirmRoot'), 'start 路径必须记住候选根')
+  const confirmFn = APP.slice(
+    APP.indexOf('async function confirmOverwrite('),
+    APP.indexOf('function cancelOverwrite(')
+  )
+  assert.ok(confirmFn.length > 0, '必须能定位到 confirmOverwrite 的实现')
+  assert.match(confirmFn, /confirmSource\.value === 'start'/, '必须按来源分流')
+  assert.match(
+    confirmFn,
+    /callExtension\('startRootMigration'/,
+    'start 路径必须调 startRootMigration'
+  )
+  assert.match(
+    confirmFn,
+    /callExtension\('resolveRootMigration'/,
+    'resolve 路径必须调 resolveRootMigration'
+  )
+  assert.match(confirmFn, /confirmOverwrite: true/, 'start 路径必须显式带 confirmOverwrite: true')
+  assert.match(confirmFn, /names[,)\s]/, '两条路径都必须把用户看过的清单回传')
+  // 扩展侧必须校验"声明看过的清单"确实覆盖了当前冲突集
+  const INDEX = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(
+    INDEX,
+    /const confirmedNames = Array\.isArray\(params\?\.names\)/,
+    '确认清单必须来自入参'
+  )
+  assert.match(INDEX, /const covered = conflictsConfirmed\(/, '必须校验覆盖一致性，否则拒绝执行')
+})
+
+test('R25：未受管目录警示行（缺标记 ⇒ 删除与清理已被拒绝）', () => {
+  assert.ok(APP.includes('该目录不是本扩展管理的目录：删除与清理已被拒绝'), '警示行文案必须存在')
+  assert.ok(APP.includes('rootbar--warn'), '必须有警示样式')
+  assert.ok(APP.includes('unmanaged'), '警示行必须由 rootStatus 的 unmanaged 驱动')
+})
+
+test('R25：「浏览…」按钮存在，且降级文案写明"手填目录路径"', () => {
+  assert.ok(APP.includes('浏览…'), '必须有「浏览…」按钮')
+  assert.ok(APP.includes("callExtension('browseRootDir'"), '必须调扩展入口的 browseRootDir')
+  assert.ok(APP.includes('manualRoot'), '必须有手填输入框（老宿主的主入口）')
+  assert.ok(APP.includes('submitManualRoot'), '手填必须走与设置页同一个迁移入口')
+  assert.ok(APP.includes("callExtension('startRootMigration'"), '手填提交必须走 startRootMigration')
+  // 降级文案在**扩展入口**（index.js）里给出，界面只负责显示 note
+  const INDEX = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.ok(INDEX.includes("properties: ['openDirectory']"), '必须请求目录选择')
+  assert.ok(INDEX.includes('请在下方粘贴目录路径'), '降级文案必须告诉用户怎么继续')
+  assert.ok(INDEX.includes('当前 obox 版本不支持「选择目录」'), '降级文案必须诚实说明原因')
+  assert.ok(APP.includes('browseNote'), '界面必须显示降级提示')
+})
+
+test('I5：卡片数据目录文案已动态化（不再硬编码 chrome/）', () => {
+  assert.ok(!CARD.includes('数据目录：chrome/'), 'CARD 不得再硬编码 chrome/')
+  assert.ok(CARD.includes('dataDir'), '卡片必须接受 dataDir prop')
+  assert.ok(CARD.includes('数据目录：${dataDirText.value}'), '卡片 title 必须用动态文案')
+  // 界面**不得**自己拼路径（会变成第二份根解析实现）：路径由 index.js 算好
+  assert.ok(!/abbreviateRoot|profileRoot\.mjs/.test(CARD), '卡片不得 import lib/profileRoot.mjs')
+  const INDEX = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.ok(INDEX.includes('formatCardDataDir'), '数据目录文案必须由扩展入口算')
+})
+
+test('P4：界面显示"卸载扩展时不会删除它"（外部根对照提示）', () => {
+  assert.ok(APP.includes('卸载扩展时不会删除它'), '迁移完成提示必须写明外部根不会被卸载删除')
+  assert.ok(APP.includes('需你自行清理'), '放弃迁移的文案必须写明需自行清理')
+})
+
+test('界面纪律：底部状态栏仍不得复活，且新界面样式走 token', () => {
+  assert.ok(!APP.includes('StatusBar'), 'App.vue 仍不得引用 StatusBar')
+  assert.ok(!STYLES.includes('.statusbar'), 'styles.css 仍不得有 .statusbar')
+  // 新样式必须是"零色彩字面量"（一律走宿主 token）
+  const rootbarBlock = STYLES.slice(STYLES.indexOf('.rootbar {'), STYLES.indexOf('.search {'))
+  assert.ok(rootbarBlock.length > 0, '必须新增 .rootbar 样式块')
+  assert.ok(
+    !/#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(rootbarBlock),
+    '.rootbar 样式里不得出现色值字面量（只允许 var(--token)）'
+  )
 })

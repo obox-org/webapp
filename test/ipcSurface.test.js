@@ -71,8 +71,9 @@ test('反向：index.js 分发的每个方法，src 里都应有调用点（不�
   assert.deepEqual(dead, [], `这些方法被实现但没有界面调用点：${dead.join('、')}`)
 })
 
-test('方法集合与规格 §11.1 一致（恰好 8 个，不多不少）', () => {
+test('方法集合与规格一致（v1.0.3 起恰好 12 个：8 个既有 + 4 个 profile 根相关，不多不少）', () => {
   assert.deepEqual(dispatchedMethods(), [
+    'browseRootDir',
     'cleanCaches',
     'list',
     'open',
@@ -80,8 +81,90 @@ test('方法集合与规格 §11.1 一致（恰好 8 个，不多不少）', () 
     'profileInfo',
     'profileSize',
     'remove',
-    'save'
+    'resolveRootMigration',
+    'rootStatus',
+    'save',
+    'startRootMigration'
   ])
+})
+
+test('R-17/R-25：四个新方法都有真实实现（不是只挂在分发表上）', () => {
+  const text = readFileSync(INDEX_URL, 'utf8')
+  // `rootStatus`：读设置 + 读根状态 + 回生效根
+  assert.match(text, /profileRootStatus/, 'rootStatus 必须调助手的 profileRootStatus')
+  assert.match(text, /effectiveRoot/, 'rootStatus 必须回生效根（迁移未完成时 = 旧根）')
+  assert.match(text, /SETTING_KEYS\.profileRoot|'webapp\.profileRoot'/, '必须读第三个设置键')
+  // `startRootMigration`：建根写标记 + 冲突预检 + 不确认不动手
+  assert.match(text, /prepareRoot/, '迁移前必须 prepareRoot（目标根必须有标记）')
+  assert.match(text, /needsConfirm/, '有冲突且未确认必须回 needsConfirm（不开始、不动手）')
+  assert.match(text, /confirmOverwrite/, '必须支持"用户已确认覆盖"的入参')
+  // `resolveRootMigration`：三个动作
+  for (const action of ["'continue'", "'abandon'", "'confirm-overwrite'"]) {
+    assert.ok(text.includes(action), `resolveRootMigration 必须支持 ${action}`)
+  }
+  // `browseRootDir`：目录能力 + 降级（老宿主不得报错）
+  assert.match(text, /properties: \['openDirectory'\]/, '必须请求目录选择')
+  assert.match(text, /checkRootCandidate/, '候选路径的判定必须落到助手侧')
+  assert.match(text, /supported/, '必须回 supported 供界面决定降级形态')
+})
+
+test('数据安全：设置值只在迁移全部完成后写一次（唯一写点）', () => {
+  const text = readFileSync(INDEX_URL, 'utf8')
+  const writes = [...text.matchAll(/api\.settings\.set\(/g)]
+  assert.equal(
+    writes.length,
+    3,
+    `api.settings.set 的出现次数必须恰为 3（迁移完成 / 放弃回写 / 无存量条目），实际 ${writes.length}`
+  )
+  // 三处都必须在"迁移编排"这一大段里，且迁移完成那次必须在 isMigrationComplete/advanceMigrationState 判定之后
+  const completeAt = text.indexOf('advanceMigrationState(current)')
+  const setAfter = text.indexOf('api.settings.set', completeAt)
+  assert.ok(completeAt > 0 && setAfter > completeAt, '写设置必须发生在"全部完成"判定之后')
+})
+
+test('数据安全：意图文件写在扩展 data 目录（api.fs），**不得**写进根里', () => {
+  const text = readFileSync(INDEX_URL, 'utf8')
+  // 意图文件名由 `lib/profileRoot.mjs` 的 `ROOT_INTENT` 常量提供（单一来源），
+  // `index.js` 里是 `ROOT_INTENT_REL`（同一来源的别名）
+  assert.match(
+    text,
+    /ROOT_INTENT_REL|\.pending-move-root\.json/,
+    '必须出现意图文件名（或它的常量）'
+  )
+  assert.match(
+    text,
+    /api\.fs\.(readFile|writeFile|remove)/,
+    '意图文件必须经 api.fs（data 目录内）读写'
+  )
+  assert.ok(
+    !/join\([^)]*root[^)]*(ROOT_INTENT|pending-move-root)/i.test(text),
+    '不得把意图文件拼到 profile 根里（根会移动 ⇒ 中立性丢失）'
+  )
+})
+
+test('顺序与互斥：迁移未完成时禁止改名与再次改根', () => {
+  const text = readFileSync(INDEX_URL, 'utf8')
+  assert.match(text, /migrationBlocksRename/, '改名必须检查迁移互斥')
+  assert.match(text, /浏览器数据正在迁移，请先完成或放弃迁移后再改名/, '改名被拒的文案必须存在')
+  assert.match(
+    text,
+    /已有一次未完成的浏览器数据迁移，请先完成或放弃后再改根/,
+    '再次改根被拒的文案必须存在'
+  )
+})
+
+test('卸载语义（P4）：uninstall 钩子不触碰外部根，并把两句话写清楚', () => {
+  const text = readFileSync(INDEX_URL, 'utf8')
+  const start = text.indexOf('export async function uninstall')
+  assert.ok(start > 0, '必须有 uninstall 钩子')
+  const body = text.slice(start)
+  assert.match(body, /卸载扩展时不会删除它/, '必须写明外部根不会被卸载删除')
+  assert.match(body, /需你自行清理/, '必须写明外部根需用户自行清理')
+  assert.match(body, /ROOT_INTENT_REL/, '卸载时允许删掉迁移意图文件（避免重装后误判）')
+  assert.ok(
+    !/\.(rm|rmdir|rename|unlink|copyFile)\(/.test(body),
+    'uninstall 里不得出现任何搬移/删除数据的调用（只允许删意图文件与记日志）'
+  )
 })
 
 test('R17：index.js 真的读了两个设置键，并真的产出 [profile-over-limit]', () => {

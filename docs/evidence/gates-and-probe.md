@@ -85,3 +85,94 @@ node scripts/pack.mjs   →  out/webapp-1.0.0.oix（244,074 字节，11 个条�
 | `api.sqlite` 库落 `<userData>/extensions/<id>/data/` | `src/main/sqlite.ts:34-37` |
 | stdio 助手用 Electron 二进制 + `ELECTRON_RUN_AS_NODE=1`，cwd = `<扩展目录>/data` | `src/main/ipcCore.ts:612-627`、`src/main/ipc.ts:452-471` |
 | 宿主 `SettingField` 无 `min`/`max` ⇒ 数值设置只能用 select 枚举 | `src/api/contributions.ts:76-89` |
+
+---
+
+## 5. v1.0.3（amendment 08：可配置 profile 根 + 自动迁移）新增门禁的运行输出
+
+> 本节由 1.0.3 的实现提交追加。前三节是 1.0.2 及更早的记录，**未改动**。
+
+### 5.1 `node --test`（基线 131 → **194 例**）
+
+```text
+$ cd extensions/webapp
+$ node --test
+ℹ tests 194
+ℹ suites 0
+ℹ pass 194
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10431.4409
+```
+
+新增的两个门禁文件：
+
+```text
+$ node --test test/profileRoot.test.js
+ℹ tests 27
+ℹ pass 27
+ℹ fail 0
+
+$ node --test test/rootMigration.test.js
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+```
+
+真实子进程集成测（含缺标记门禁 / 自定义根 / 迁移原语）：
+
+```text
+$ node --test test/helper.test.js
+ℹ tests 15
+ℹ pass 15
+ℹ fail 0
+```
+
+### 5.2 `npx prettier --check .`
+
+```text
+$ npx prettier --check .
+Checking formatting...
+All matched files use Prettier code style!
+# exit 0
+```
+
+### 5.3 `npm run build`
+
+```text
+$ npm run build
+vite v7.3.7 building client environment for production...
+✓ 26 modules transformed.
+../ui/index.html                   0.56 kB │ gzip:  0.43 kB
+../ui/assets/style-BmzGBtmu.css   10.51 kB │ gzip:  2.41 kB
+../ui/assets/index-DruDUmUk.js   113.09 kB │ gzip: 42.75 kB
+✓ built in 370ms
+```
+
+（1.0.2 的 CSS 是 9,593 字节；1.0.3 是 10.51 kB —— 新增的是 `.rootbar*` 与 `.overwrite__*` 两组规则。）
+
+### 5.4 `node scripts/pack.mjs`（附录 A：产物核对）
+
+见 `docs/evidence/profile-root-migration.md` 的 §2.4 与 §3（含条目清单、`no data/`、`no src/`、
+包内 `version=1.0.3`、CSS/JS 里新要素的核对命令与现场输出）。
+
+### 5.5 `helper.cjs --selftest`（exit 0）
+
+```text
+$ node helper.cjs --selftest
+[webapp-helper] selftest 通过（临时目录 C:\…\obox-webapp-selftest-…，未启动 Chrome；缓存白名单 10 项、保留清单 19 项、TTL 60s）
+# exit 0
+```
+
+1.0.3 新增的第 ⑩ 组断言（自定义根 / 缺标记 / `prepareRoot` 幂等 / `checkRootCandidate` 只读 /
+`migrateRootDir` 的 probe+move 与覆盖两态）逐条见 `docs/evidence/profile-root-migration.md` 的 §2.5。
+
+### 5.6 宿主侧（票 00，obox 仓库）
+
+宿主改动已合并进 obox `master`（`703d6d0`，未发版）：`api.dialog.showOpenDialog` 支持
+`properties: ['openDirectory']`。对应宿主测试 `test/ext-dialog.test.ts`（归一对的表驱动用例 +
+源码门禁"`ext.ts` 不再硬编码 `properties: ['openFile'`"）由**那一侧**记录；
+本扩展侧只做**行为探测 + 降级**（不依赖宿主版本），源码级证据见
+`docs/evidence/profile-root-migration.md` 的 §5。

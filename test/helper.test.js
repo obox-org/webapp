@@ -11,7 +11,14 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync
+} from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -414,6 +421,498 @@ test('stdout 纯净性：整个会话里每一行都能 JSON.parse，且 stdin �
     const code = await helper.close()
     assert.equal(code, 0, `stdin 关闭后助手应自行退出（stderr: ${helper.stderrText()}）`)
   } finally {
+    await cleanupDir(cwd)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v1.0.3：生效根（自定义根）与标记门禁（规格 §9.2 R-6 / §9.3 / §14.2 H-2..H-16）
+// ---------------------------------------------------------------------------
+
+/** 造一个"自定义根"下的条目目录（`<root>/<name>/Default/{Cookies,Preferences}` + Cache） */
+function makeEntryInRoot(root, name) {
+  const profile = join(root, name)
+  mkdirSync(join(profile, 'Default', 'Cache'), { recursive: true })
+  mkdirSync(join(profile, 'Default', 'Local Storage'), { recursive: true })
+  writeFileSync(join(profile, 'Default', 'Cookies'), 'cookie-value', 'utf8')
+  writeFileSync(join(profile, 'Default', 'Preferences'), '{"a":1}', 'utf8')
+  writeFileSync(join(profile, 'Default', 'Login Data'), 'login-data', 'utf8')
+  writeFileSync(join(profile, 'Default', 'Cache', 'blob'), 'C'.repeat(1024), 'utf8')
+  return profile
+}
+
+/** 起一个助手并把"自定义根"传进每一次调用（`root` 是可选入参，助手逐次解析） */
+function sendWithRoot(helper, id, method, params, root) {
+  helper.send({ jsonrpc: '2.0', id, method, params: { ...params, root } })
+  return helper.waitFor((r) => r.id === id)
+}
+
+test('R-6：自定义根下的体积与清理（只删白名单缓存，Cookies 逐字节不变）', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-custom-root-'))
+  const root = join(cwd, 'custom-profiles')
+  const helper = startHelper(cwd)
+  try {
+    // 先 prepareRoot（写标记）：**根还不存在** ⇒ 第一次必须 created:true；默认根豁免标记，自定义根不豁免
+    const prepared = await sendWithRoot(helper, 60, 'prepareRoot', {}, root)
+    assert.equal(
+      prepared.error,
+      undefined,
+      `prepareRoot 不得报错：${JSON.stringify(prepared.error)}`
+    )
+    assert.deepEqual(prepared.result, { root, created: true, marked: true })
+    assert.ok(existsSync(join(root, '.obox-webapp-root')), '标记文件必须写出')
+    // 幂等：第二次 created:false
+    const again = await sendWithRoot(helper, 69, 'prepareRoot', {}, root)
+    assert.equal(again.result.created, false)
+
+    const profile = makeEntryInRoot(root, '站点C')
+
+    // 体积：dir 必须指向自定义根
+    const size = await sendWithRoot(helper, 61, 'profileSize', { name: '站点C' }, root)
+    assert.equal(size.result.exists, true)
+    assert.equal(size.result.dir, join(root, '站点C'), 'dir 必须落在自定义根下')
+    assert.ok(size.result.bytes > 0)
+
+    const before = sha256(readFileSync(join(profile, 'Default', 'Cookies'), 'utf8'))
+    const cleaned = await sendWithRoot(helper, 62, 'cleanCaches', { name: '站点C' }, root)
+    assert.equal(cleaned.error, undefined)
+    assert.equal(cleaned.result.refused, undefined, '有标记 ⇒ 不得拒绝')
+    assert.ok(cleaned.result.cleaned[0].removedDirs.includes('Default/Cache'))
+    assert.ok(!existsSync(join(profile, 'Default', 'Cache')), '白名单缓存目录必须被删掉')
+    assert.equal(
+      sha256(readFileSync(join(profile, 'Default', 'Cookies'), 'utf8')),
+      before,
+      'Cookies 必须逐字节不变'
+    )
+    assert.ok(existsSync(join(profile, 'Default', 'Login Data')), 'Login Data 必须保留')
+    assert.ok(existsSync(join(profile, 'Default', 'Local Storage')), 'Local Storage 必须保留')
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('缺标记拒删 / 拒清理 / 拒改名（自定义根），且一个字节都没动', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-unmarked-'))
+  const root = join(cwd, 'unmarked-root')
+  const profile = makeEntryInRoot(root, '站点U')
+  const helper = startHelper(cwd)
+  try {
+    // 只读操作放行（打开是"写"、量体积是"读"）
+    const status = await sendWithRoot(helper, 70, 'profileRootStatus', {}, root)
+    assert.equal(status.result.marked, false)
+    assert.equal(status.result.unmanaged, true, '自定义根缺标记 ⇒ unmanaged')
+    assert.deepEqual(status.result.entries, ['站点U'], 'entries 只回目录名')
+    assert.equal(status.error, undefined)
+
+    const size = await sendWithRoot(helper, 71, 'profileSize', { name: '站点U' }, root)
+    assert.equal(size.error, undefined, '量体积是只读 ⇒ 缺标记也必须放行（降级原则）')
+
+    const before = sha256(readFileSync(join(profile, 'Default', 'Cookies'), 'utf8'))
+
+    // 删：拒绝（-32603 [profile-root-unmarked]）
+    const removed = await sendWithRoot(helper, 72, 'removeProfile', { name: '站点U' }, root)
+    assert.equal(removed.error.code, -32603, `删除必须被拒：${JSON.stringify(removed.result)}`)
+    assert.match(removed.error.message, /\[profile-root-unmarked\]/)
+    assert.match(removed.error.message, /不是本扩展管理的目录/)
+    assert.ok(existsSync(profile), '被拒的删除不得动目录')
+
+    // 清理：整体拒绝（**不抛错**，回 refused）
+    const cleaned = await sendWithRoot(helper, 73, 'cleanCaches', { name: '站点U' }, root)
+    assert.equal(cleaned.error, undefined, '清理被拒必须回结果而不是抛错')
+    assert.match(String(cleaned.result.refused), /\[profile-root-unmarked\]/)
+    assert.deepEqual(cleaned.result.cleaned, [])
+    assert.ok(existsSync(join(profile, 'Default', 'Cache')), '被拒的清理不得动缓存目录')
+
+    // 改名：拒绝（改名会移动数据）
+    const moved = await sendWithRoot(
+      helper,
+      74,
+      'moveProfile',
+      { from: '站点U', to: '站点U2' },
+      root
+    )
+    assert.equal(moved.error.code, -32603)
+    assert.match(moved.error.message, /\[profile-root-unmarked\]/)
+    assert.ok(existsSync(profile), '被拒的改名不得动源')
+    assert.ok(!existsSync(join(root, '站点U2')), '被拒的改名不得产生目标')
+
+    assert.equal(
+      sha256(readFileSync(join(profile, 'Default', 'Cookies'), 'utf8')),
+      before,
+      '三次被拒的操作之后 Cookies 必须逐字节未变'
+    )
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('默认根**豁免**标记校验：删掉标记文件后删除/清理/改名仍然放行', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-default-exempt-'))
+  makeProfile(cwd, '站点D')
+  const helper = startHelper(cwd)
+  try {
+    // 默认根下**没有**标记文件（1.0.2 从未写过）——这正是"默认根天然可信"的场景
+    assert.ok(!existsSync(join(cwd, 'chrome', '.obox-webapp-root')), '默认根下本来就没有标记文件')
+    const status = await helper.waitFor(
+      (() => {
+        helper.send({ jsonrpc: '2.0', id: 80, method: 'profileRootStatus', params: {} })
+        return (r) => r.id === 80
+      })()
+    )
+    assert.equal(status.result.isDefault, true)
+    assert.equal(status.result.unmanaged, false, '默认根永远不算"未受管"')
+
+    // 清理放行
+    helper.send({ jsonrpc: '2.0', id: 81, method: 'cleanCaches', params: { name: '站点D' } })
+    const cleaned = await helper.waitFor((r) => r.id === 81)
+    assert.equal(cleaned.result.refused, undefined, '默认根缺标记也必须放行清理')
+    assert.ok(cleaned.result.cleaned[0].removedDirs.length > 0)
+
+    // 改名放行
+    helper.send({
+      jsonrpc: '2.0',
+      id: 82,
+      method: 'moveProfile',
+      params: { from: '站点D', to: '站点D2' }
+    })
+    const moved = await helper.waitFor((r) => r.id === 82)
+    assert.equal(moved.error, undefined, '默认根缺标记也必须放行改名')
+    assert.equal(moved.result.moved, true)
+
+    // 删除放行
+    helper.send({ jsonrpc: '2.0', id: 83, method: 'removeProfile', params: { name: '站点D2' } })
+    const removed = await helper.waitFor((r) => r.id === 83)
+    assert.equal(removed.error, undefined, '默认根缺标记也必须放行删除')
+    assert.equal(removed.result.removed, true)
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('「永不删根」：根目录本身永远不是删/移的对象', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-never-root-'))
+  const root = join(cwd, 'keep-root')
+  makeEntryInRoot(root, '保留条目')
+  writeFileSync(join(root, 'marker.txt'), 'not a profile', 'utf8')
+  mkdirSync(join(root, 'not-an-entry'), { recursive: true })
+  const helper = startHelper(cwd)
+  try {
+    // 用尽各种"想删根"的名字：空串 / `.` / `..` / `.trash` / 带分隔符 / 盘符
+    for (const [id, name] of [
+      [90, ''],
+      [91, '.'],
+      [92, '..'],
+      [93, '.trash'],
+      [94, 'a/b'],
+      [95, 'C:\\'],
+      [96, '..\\..']
+    ]) {
+      helper.send({ jsonrpc: '2.0', id, method: 'removeProfile', params: { name, root } })
+      const bad = await helper.waitFor((r) => r.id === id)
+      assert.ok(bad.error, `name=${JSON.stringify(name)} 必须被拒`)
+      assert.equal(bad.error.code, -32602, `name=${JSON.stringify(name)} 应是 -32602`)
+      helper.responses.length = 0
+    }
+    assert.ok(existsSync(root), '根目录本身必须仍在')
+    assert.ok(existsSync(join(root, 'marker.txt')), '根下的非条目文件必须未被触碰')
+    assert.ok(existsSync(join(root, 'not-an-entry')), '根下的非条目目录必须未被触碰')
+
+    // `profileRootStatus.entries` 只回目录、且排除 `.trash`
+    mkdirSync(join(root, '.trash'), { recursive: true })
+    const status = await sendWithRoot(helper, 97, 'profileRootStatus', {}, root)
+    assert.deepEqual(
+      status.result.entries,
+      ['not-an-entry', '保留条目'],
+      'entries 只含目录且排除 .trash'
+    )
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('prepareRoot 幂等 + checkRootCandidate 纯只读 + migrateRootDir 三态', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-migrate-'))
+  const root = join(cwd, 'target-root')
+  const helper = startHelper(cwd)
+  try {
+    // prepareRoot：第一次 created，第二次不 created，标记文件仍只有一个
+    const first = await sendWithRoot(helper, 100, 'prepareRoot', {}, root)
+    assert.deepEqual(first.result, { root, created: true, marked: true })
+    const second = await sendWithRoot(helper, 101, 'prepareRoot', {}, root)
+    assert.equal(second.result.created, false)
+    const markerFiles = readdirSync(root).filter((name) => name === '.obox-webapp-root')
+    assert.equal(markerFiles.length, 1)
+    assert.deepEqual(
+      Object.keys(JSON.parse(readFileSync(join(root, '.obox-webapp-root'), 'utf8'))).sort(),
+      ['createdAt', 'extId', 'marker', 'root', 'version'],
+      '标记内容字段集合必须恰好五字段'
+    )
+
+    // checkRootCandidate：**纯只读**（跑完磁盘上没有任何新增文件）
+    const someFile = join(cwd, 'some-file.txt')
+    writeFileSync(someFile, 'x', 'utf8')
+    const beforeList = readdirSync(cwd).sort()
+    const asDir = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 102,
+          method: 'checkRootCandidate',
+          params: { candidate: someFile }
+        })
+        return (r) => r.id === 102
+      })()
+    )
+    assert.equal(asDir.result.isDirectory, false, '传文件 ⇒ isDirectory:false（老宿主的降级信号）')
+    assert.equal(asDir.result.parent, cwd, 'parent 必须是其父目录')
+    assert.equal(asDir.result.invalid, null)
+
+    helper.send({
+      jsonrpc: '2.0',
+      id: 103,
+      method: 'checkRootCandidate',
+      params: { candidate: 'cap-relative' }
+    })
+    const relative = await helper.waitFor((r) => r.id === 103)
+    assert.match(String(relative.result.invalid?.reason), /绝对路径/)
+
+    helper.send({
+      jsonrpc: '2.0',
+      id: 104,
+      method: 'checkRootCandidate',
+      params: { candidate: 'C:\\' }
+    })
+    const drive = await helper.waitFor((r) => r.id === 104)
+    assert.match(String(drive.result.invalid?.reason), /磁盘根目录/)
+
+    helper.send({
+      jsonrpc: '2.0',
+      id: 105,
+      method: 'checkRootCandidate',
+      params: { candidate: '\\\\server\\share\\profiles' }
+    })
+    const unc = await helper.waitFor((r) => r.id === 105)
+    assert.equal(unc.result.kind, 'absolute-unc')
+    assert.ok(String(unc.result.warning ?? '').length > 0, 'UNC 必须带性能警告')
+
+    assert.deepEqual(readdirSync(cwd).sort(), beforeList, 'checkRootCandidate 不得写任何东西')
+
+    // migrateRootDir：probe（只读）→ 未确认覆盖 ⇒ skipped → 已确认 ⇒ overwritten
+    const fromRoot = join(cwd, 'from-root')
+    makeEntryInRoot(fromRoot, '迁移条目')
+    makeEntryInRoot(root, '迁移条目') // 目标已有同名 ⇒ 冲突
+    const targetMarker = readFileSync(join(root, '迁移条目', 'Default', 'Preferences'), 'utf8')
+
+    const probe = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 110,
+          method: 'migrateRootDir',
+          params: { from: fromRoot, to: root, name: '迁移条目', action: 'probe' }
+        })
+        return (r) => r.id === 110
+      })()
+    )
+    assert.equal(probe.result.source.exists, true)
+    assert.equal(probe.result.target.exists, true)
+    assert.equal(probe.result.conflict, true, '两侧同名 ⇒ conflict')
+    assert.equal(probe.result.sameVolume, true)
+
+    // 未确认 ⇒ skipped，**两侧逐字节未变**
+    const sourceCookie = sha256(
+      readFileSync(join(fromRoot, '迁移条目', 'Default', 'Cookies'), 'utf8')
+    )
+    const skipped = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 111,
+          method: 'migrateRootDir',
+          params: { from: fromRoot, to: root, name: '迁移条目', action: 'move' }
+        })
+        return (r) => r.id === 111
+      })()
+    )
+    assert.equal(skipped.result.status, 'skipped')
+    assert.match(skipped.result.reason, /未确认覆盖/)
+    assert.equal(skipped.result.targetRemoved, false)
+    assert.equal(
+      readFileSync(join(root, '迁移条目', 'Default', 'Preferences'), 'utf8'),
+      targetMarker,
+      '未确认时目标内容必须一字未动'
+    )
+    assert.equal(
+      sha256(readFileSync(join(fromRoot, '迁移条目', 'Default', 'Cookies'), 'utf8')),
+      sourceCookie,
+      '未确认时源内容必须一字未动'
+    )
+
+    // 已确认 ⇒ overwritten：目标旧内容消失、源已删
+    const overwritten = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 112,
+          method: 'migrateRootDir',
+          params: { from: fromRoot, to: root, name: '迁移条目', action: 'move', overwrite: true }
+        })
+        return (r) => r.id === 112
+      })()
+    )
+    assert.equal(overwritten.result.status, 'overwritten')
+    assert.equal(overwritten.result.overwritten, true)
+    assert.equal(overwritten.result.targetRemoved, true, '覆盖必须先删目标同名目录')
+    assert.equal(
+      sha256(readFileSync(join(root, '迁移条目', 'Default', 'Cookies'), 'utf8')),
+      sourceCookie,
+      '覆盖后目标内容必须等于源内容'
+    )
+    assert.ok(!existsSync(join(fromRoot, '迁移条目')), '覆盖后源必须已删除')
+
+    // 源与目标都不存在 ⇒ missing（不阻塞整体）
+    const missing = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 113,
+          method: 'migrateRootDir',
+          params: { from: fromRoot, to: root, name: '不存在的条目', action: 'move' }
+        })
+        return (r) => r.id === 113
+      })()
+    )
+    assert.equal(missing.result.status, 'missing')
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('migrateRootDir：跨卷（forceCopy）先校验后删源；根缺标记的**源**仍然放行', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-crossvol-'))
+  // ⚠️ 源根**故意不写标记**（P3b = A：迁移的源根允许缺标记，否则"手工拷出来的旧根"永远搬不动）
+  const fromRoot = join(cwd, 'manual-copy-root')
+  const toRoot = join(cwd, 'new-root')
+  makeEntryInRoot(fromRoot, '手工搬来的条目')
+  mkdirSync(toRoot, { recursive: true })
+  const helper = startHelper(cwd)
+  try {
+    const sourceCookie = sha256(
+      readFileSync(join(fromRoot, '手工搬来的条目', 'Default', 'Cookies'), 'utf8')
+    )
+    const moved = await helper.waitFor(
+      (() => {
+        helper.send({
+          jsonrpc: '2.0',
+          id: 120,
+          method: 'migrateRootDir',
+          params: {
+            from: fromRoot,
+            to: toRoot,
+            name: '手工搬来的条目',
+            action: 'move',
+            forceCopy: true
+          }
+        })
+        return (r) => r.id === 120
+      })()
+    )
+    assert.equal(moved.result.status, 'done', `跨卷迁移应成功：${moved.result.reason}`)
+    assert.equal(moved.result.crossVolume, true)
+    assert.equal(
+      sha256(readFileSync(join(toRoot, '手工搬来的条目', 'Default', 'Cookies'), 'utf8')),
+      sourceCookie,
+      '复制后目标内容必须与源逐字节一致'
+    )
+    assert.ok(
+      existsSync(join(toRoot, '手工搬来的条目', 'Default', 'Preferences')),
+      '关键文件必须搬全'
+    )
+    assert.ok(!existsSync(join(fromRoot, '手工搬来的条目')), '校验通过后才允许删源')
+    // 源根缺标记**不是**拒绝理由（P3b）
+    assert.ok(!existsSync(join(fromRoot, '.obox-webapp-root')), '源根本来就没有标记')
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('root 入参校验：相对路径 / 盘符根 ⇒ -32602 [profile-root-invalid]', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-root-invalid-'))
+  const helper = startHelper(cwd)
+  try {
+    for (const [id, root] of [
+      [130, 'chrome'],
+      [131, 'C:\\'],
+      [132, 'profiles\\x'],
+      [133, '\\\\server\\share']
+    ]) {
+      helper.send({
+        jsonrpc: '2.0',
+        id,
+        method: 'profileRootStatus',
+        params: { root }
+      })
+      const bad = await helper.waitFor((r) => r.id === id)
+      assert.ok(bad.error, `root=${root} 必须被拒`)
+      assert.equal(bad.error.code, -32602, `root=${root} 应是 -32602`)
+      assert.match(bad.error.message, /\[profile-root-invalid\]/)
+      helper.responses.length = 0
+    }
+    // 合法自定义根（不存在的目录也算合法：V7 允许创建）
+    helper.send({
+      jsonrpc: '2.0',
+      id: 134,
+      method: 'profileRootStatus',
+      params: { root: join(cwd, 'not-created-yet') }
+    })
+    const okRoot = await helper.waitFor((r) => r.id === 134)
+    assert.equal(okRoot.error, undefined)
+    assert.equal(okRoot.result.exists, false)
+    assert.equal(okRoot.result.isDefault, false)
+  } finally {
+    await helper.close()
+    await cleanupDir(cwd)
+  }
+})
+
+test('launch 的 --user-data-dir 两种形态：默认根相对、自定义根绝对（其它绝对路径一律拒）', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'obox-webapp-udd-'))
+  const root = join(cwd, 'my-root')
+  mkdirSync(root, { recursive: true })
+  const helper = startHelper(cwd)
+  try {
+    // 形态非法（绝对但不在生效根内）⇒ -32602，且**不得**真的去 spawn Chrome
+    helper.send({
+      jsonrpc: '2.0',
+      id: 140,
+      method: 'launch',
+      params: {
+        args: ['--app=https://a/', `--user-data-dir=${join(cwd, 'other-root', 'x')}`],
+        root
+      }
+    })
+    const bad = await helper.waitFor((r) => r.id === 140)
+    assert.equal(bad.error.code, -32602)
+    assert.match(bad.error.message, /只允许 chrome\/<单层目录名> 形态/)
+
+    // 相对形态 + 自定义根：相对形态一律解析为 `chrome/<名>`（生效根只影响绝对形态）
+    helper.send({
+      jsonrpc: '2.0',
+      id: 141,
+      method: 'launch',
+      params: { args: ['--app=https://a/', '--user-data-dir=chrome/x', '--proxy-server=p'], root }
+    })
+    const forbidden = await helper.waitFor((r) => r.id === 141)
+    assert.equal(forbidden.error.code, -32602)
+    assert.match(forbidden.error.message, /不接受参数 --proxy-server/)
+  } finally {
+    await helper.close()
     await cleanupDir(cwd)
   }
 })

@@ -24,12 +24,12 @@ const settings = manifest.contributes?.settings
 const fields = settings?.fields ?? []
 const byKey = Object.fromEntries(fields.map((field) => [field.key, field]))
 
-test('manifest.contributes.settings 存在且形状正确', () => {
+test('manifest.contributes.settings 存在且形状正确（v1.0.3 起恰好三个设置项）', () => {
   assert.ok(settings, 'contributes.settings 必须存在（R17 的设置页）')
   assert.equal(settings.id, 'webapp.settings')
   assert.ok(String(settings.title ?? '').trim(), 'settings.title 必须非空')
   assert.ok(Array.isArray(fields), 'settings.fields 必须是数组')
-  assert.equal(fields.length, 2, '恰好两个设置项（不多不少）')
+  assert.equal(fields.length, 3, '恰好三个设置项（两个 select + 一个 text，不多不少）')
   for (const field of fields) {
     assert.ok(String(field.key ?? '').trim(), '每个字段必须有 key')
     assert.ok(String(field.label ?? '').trim(), `${field.key} 必须有 label`)
@@ -42,18 +42,20 @@ test('manifest.contributes.settings 存在且形状正确', () => {
   }
 })
 
-test('两个键名固定：webapp.profileLimitMb 与 webapp.diskCacheMb（且含扩展前缀）', () => {
+test('三个键名固定：profileLimitMb / diskCacheMb / profileRoot（且含扩展前缀）', () => {
   assert.deepEqual(fields.map((field) => field.key).sort(), [
     SETTING_KEYS.diskCacheMb,
-    SETTING_KEYS.profileLimitMb
+    SETTING_KEYS.profileLimitMb,
+    SETTING_KEYS.profileRoot
   ])
   for (const field of fields) {
     assert.ok(field.key.startsWith('webapp.'), `${field.key} 必须带 webapp. 前缀`)
   }
 })
 
-test('两项都是 select（宿主 SettingField 没有 min/max，枚举是唯一能约束取值的手段）', () => {
+test('两个下拉仍是 select、新字段是 text（text 必须有非空 default）', () => {
   for (const field of fields) {
+    if (field.key === SETTING_KEYS.profileRoot) continue
     assert.equal(field.type, 'select', `${field.key} 必须是 select（R-W19）`)
     assert.ok(
       Array.isArray(field.options) && field.options.length > 0,
@@ -64,6 +66,21 @@ test('两项都是 select（宿主 SettingField 没有 min/max，枚举是唯一
       assert.ok(String(option.label ?? '').trim(), `${field.key} 的 option 缺 label`)
     }
   }
+})
+
+test('webapp.profileRoot：text、默认空串（= 用默认根）、description 必须含卸载语义与迁移语义', () => {
+  const field = byKey[SETTING_KEYS.profileRoot]
+  assert.equal(field.type, 'text', '根目录只能是 text（宿主没有目录选择控件）')
+  assert.equal(field.default, '', '默认值必须是空串（= 用默认根 `<扩展 data>/chrome`）')
+  assert.equal(field.options, undefined, 'text 字段不得带 options')
+  // P4 = A：设置项 description 必须包含卸载语义（四处文案之一）
+  assert.match(field.description, /卸载时只有默认目录下的数据会被删除/)
+  assert.match(field.description, /需你自行清理/)
+  // 迁移语义
+  assert.match(field.description, /迁移/)
+  assert.match(field.description, /绝对路径/)
+  // ⚠️ 这段文字原样进 manifest.json，所以不得出现 Markdown 标记
+  assert.ok(!/[*_`#]/.test(field.description), 'description 里不得出现 Markdown 标记')
 })
 
 test('webapp.profileLimitMb：档位与默认值与 lib 常量逐项一致（2 GB 默认，0 = 不限制）', () => {
@@ -114,8 +131,8 @@ test('contributes 只多这一个设置页（不贡献导航/状态栏/命令/�
 
 test('manifest 身份字段与规格一致（名称/作者决定安装目录名与数据目录）', () => {
   assert.equal(manifest.name, 'webapp')
-  // 版本号随 amendment 05（去掉状态栏）升到 1.0.1——这里只要求"是合法 semver"，
-  // 不把具体版本钉死（否则每次发补丁版都要改测试，反而掩盖真实回归）
+  // 版本号随 amendment 08（可配置 profile 根 + 自动迁移）升到 1.0.3——这里只要求"是合法 semver"
+  // 与"五处一致"（后者由下一条用例钉住），不把具体版本写死两份
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/, `版本应是合法 semver，实际 ${manifest.version}`)
   assert.equal(manifest.author, 'chenzhi')
   assert.equal(manifest.main, './index.js')
@@ -132,17 +149,27 @@ test('版本号在五处必须完全一致（manifest / package / lock 顶层 / 
   // 为什么要有这条：1.0.1 那次只改了 manifest 与 package.json，**漏了**
   // `package-lock.json` 与 `index.js` 里卡片注册的 `version`——卡片版本是宿主详情页显示的版本号，
   // 漏改会让用户看到旧版本。这类"多处版本源"的漂移必须由门禁挡住。
+  //
+  // v1.0.3 起 `index.js` 把版本抽成常量 `EXT_VERSION`（同一个常量同时进卡片注册与迁移意图文件），
+  // 因此这里按"常量的值"参与比对，而不是要求卡片注册处再写一遍字面量。
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
   const indexSource = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  const cardVersion = (indexSource.match(/version:\s*'([^']+)'/) ?? [])[1]
+  const constantVersion = (indexSource.match(/const EXT_VERSION = '([^']+)'/) ?? [])[1]
+  assert.ok(constantVersion, 'index.js 必须声明 EXT_VERSION 常量（版本号的单一来源）')
+  const cardVersion = indexSource.match(/version:\s*EXT_VERSION/g) ?? []
+  assert.equal(
+    cardVersion.length,
+    2,
+    `卡片注册与迁移意图都要用 EXT_VERSION，实际 ${cardVersion.length} 处`
+  )
 
   const versions = {
     'manifest.json': manifest.version,
     'package.json': pkg.version,
     'package-lock.json 顶层': lock.version,
     'package-lock.json packages[""]': lock.packages?.['']?.version,
-    'index.js 卡片注册': cardVersion
+    'index.js EXT_VERSION': constantVersion
   }
   const unique = [...new Set(Object.values(versions))]
   assert.equal(
@@ -153,6 +180,9 @@ test('版本号在五处必须完全一致（manifest / package / lock 顶层 / 
       .join('、')}`
   )
   assert.match(String(unique[0]), /^\d+\.\d+\.\d+$/, '版本必须是合法 semver')
+  // v1.0.3 是本需求的发布版本（amendment 08）；五处一致之外再钉一次具体值，
+  // 避免"五处一起漂到 1.0.4 而没有任何一处改过"这种静默失误
+  assert.equal(unique[0], '1.0.3', `本次发布的版本必须是 1.0.3，实际 ${unique[0]}`)
 })
 
 test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {

@@ -47,12 +47,13 @@ test('必须存在的分发文件与库模块清单非空且合理', () => {
     assert.ok(rel.startsWith('lib/'), `${rel} 应位于 lib/`)
     assert.ok(existsSync(join(root, rel)), `${rel} 在仓库里不存在`)
   }
-  // 四个库模块都在（index.js / helper.cjs 会加载它们）
+  // 五个库模块都在（index.js / helper.cjs 会加载它们）
   for (const rel of [
     'lib/webapp.mjs',
     'lib/chromeArgs.mjs',
     'lib/nameSanitize.mjs',
-    'lib/profileLimit.mjs'
+    'lib/profileLimit.mjs',
+    'lib/profileRoot.mjs'
   ]) {
     assert.ok(REQUIRED_LIB.includes(rel), `REQUIRED_LIB 缺少 ${rel}`)
   }
