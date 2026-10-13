@@ -582,7 +582,7 @@ export default function webapp(api) {
   const card = api.app.register({
     id: APP_ID,
     name: '网页应用',
-    version: '1.0.0',
+    version: '1.0.2',
     author: 'chenzhi',
     description: '网页应用：以 Chrome 应用模式打开内部站点，按条目独立 profile',
     icon: CARD_ICON,

@@ -128,6 +128,33 @@ test('manifest 身份字段与规格一致（名称/作者决定安装目录名�
   })
 })
 
+test('版本号在五处必须完全一致（manifest / package / lock 顶层 / lock packages[""] / index.js 卡片）', () => {
+  // 为什么要有这条：1.0.1 那次只改了 manifest 与 package.json，**漏了**
+  // `package-lock.json` 与 `index.js` 里卡片注册的 `version`——卡片版本是宿主详情页显示的版本号，
+  // 漏改会让用户看到旧版本。这类"多处版本源"的漂移必须由门禁挡住。
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
+  const indexSource = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const cardVersion = (indexSource.match(/version:\s*'([^']+)'/) ?? [])[1]
+
+  const versions = {
+    'manifest.json': manifest.version,
+    'package.json': pkg.version,
+    'package-lock.json 顶层': lock.version,
+    'package-lock.json packages[""]': lock.packages?.['']?.version,
+    'index.js 卡片注册': cardVersion
+  }
+  const unique = [...new Set(Object.values(versions))]
+  assert.equal(
+    unique.length,
+    1,
+    `五处版本必须一致，实际：${Object.entries(versions)
+      .map(([where, value]) => `${where}=${value}`)
+      .join('、')}`
+  )
+  assert.match(String(unique[0]), /^\d+\.\d+\.\d+$/, '版本必须是合法 semver')
+})
+
 test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(

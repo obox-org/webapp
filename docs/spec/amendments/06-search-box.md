@@ -1,8 +1,8 @@
-# Amendment 06：卡片列表加搜索框 + 模糊搜索（用户新增需求，并入未发布的 1.0.1）
+# Amendment 06：卡片列表加搜索框 + 模糊搜索（用户新增需求，并入未发布的 1.0.2）
 
 - 类型：**新增功能（UI + 新纯逻辑模块）**
 - 决策来源：用户直接指令（当前会话）
-- 影响版本：**不抬版本**——并入尚未发布的 `1.0.1`（与 amendment 05 同一版）
+- 影响版本：**不抬版本**——并入尚未发布的 `1.0.2`（与 amendment 05 同一版）
 - 变更范围：`src/search.js`（新增）、`src/App.vue`、`src/components/EmptyState.vue`、
   `src/styles.css`、`test/search.test.js`（新增）、`test/componentSource.test.js`、`README.md`
 - 落地状态：**已实现**（四项门槛全绿，见 `docs/evidence/gates-and-probe.md`）

@@ -392,18 +392,38 @@ function formatBytes(bytes) {
       <p v-if="loading" class="app__loading">正在加载…</p>
       <p v-else-if="loadError" class="alert alert--error">{{ loadError }}</p>
       <template v-else>
-        <!-- 搜索框：列表之上、实时过滤；Esc 清空（只在搜索框聚焦时生效，不干扰模态框） -->
-        <div v-if="rows.length" class="app__search">
-          <input
-            ref="searchInput"
-            v-model="query"
-            class="input app__search-input"
-            type="search"
-            placeholder="搜索名称 / 地址 / 说明"
-            aria-label="搜索网页应用"
-            @keydown.esc="clearQuery"
-          />
-          <button v-if="query" type="button" class="btn" @click="clearQuery">清空</button>
+        <!-- 搜索框（v1.0.2）：只在确实有条目时出现；输入即过滤，Esc 清空。
+             形态与 extensions/rdp 的搜索框**逐项一致**：胶囊形 + 内嵌放大镜 + 限宽 400px。 -->
+        <div class="search">
+          <div class="search__field">
+            <!-- 放大镜：描边取 currentColor（颜色由 CSS 的 token 决定，这里不写任何色值） -->
+            <svg class="search__icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle
+                cx="6.5"
+                cy="6.5"
+                r="4.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+              />
+              <path
+                d="M10 10l4.2 4.2"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            <input
+              ref="searchInput"
+              v-model="query"
+              type="text"
+              class="input search__input"
+              placeholder="搜索名称 / 地址 / 说明"
+              aria-label="搜索网页应用"
+              @keydown.esc="clearQuery"
+            />
+          </div>
         </div>
 
         <EmptyState
@@ -413,13 +433,12 @@ function formatBytes(bytes) {
           action-label="＋ 新建"
           @action="openCreate"
         />
-        <!-- 无匹配：复用同一个空态组件，只换文案与按钮（不新造一套） -->
+        <!-- 无匹配：复用同一个空态组件（不新造一套）；清空走搜索框自己的 Esc，这里不重复给按钮 -->
         <EmptyState
-          v-else-if="!displayRows.length"
+          v-else-if="searching && !displayRows.length"
           title="没有匹配的网页应用"
-          :hint="`没有名称 / 地址 / 说明能匹配「${query}」的条目。`"
-          action-label="清空搜索"
-          @action="clearQuery"
+          hint="换个关键词试试；按 Esc 清空搜索框即可恢复全部"
+          :show-action="false"
         />
         <div v-else class="app__grid">
           <WebappCard

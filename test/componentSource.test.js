@@ -151,17 +151,69 @@ test('主题兜底表与样式表保持同步（消费必有兜底；状态栏 t
   assert.ok(!STYLES.includes('statusbar'), 'styles.css 不得再引用 statusbar')
 })
 
-test('搜索框：与模态框输入同源（复用 .input）、Esc 清空、无匹配复用同一空态', () => {
-  assert.ok(APP.includes('class="input app__search-input"'), '搜索框必须复用 .input 样式')
+test('搜索框：复用 .input、Esc 清空、无匹配复用同一空态（与 rdp 同形态）', () => {
+  assert.ok(APP.includes('class="input search__input"'), '搜索框必须复用 .input 样式')
   assert.ok(APP.includes('搜索名称 / 地址 / 说明'), '占位文案必须说明搜哪些字段')
   assert.ok(APP.includes('@keydown.esc="clearQuery"'), 'Esc 必须清空搜索')
-  assert.ok(APP.includes('function clearQuery()'), '清空必须是显式函数（按钮与 Esc 共用）')
+  assert.ok(APP.includes('function clearQuery()'), '清空必须是显式函数（Esc 用）')
   assert.ok(APP.includes('filterAndRank'), '过滤必须走 src/search.js 的纯函数')
   // 空态复用同一个组件（不新造第二套）
   const emptyUses = APP.match(/<EmptyState/g) ?? []
   assert.equal(emptyUses.length, 2, '应该只有两种空态：还没有条目 / 无匹配，且都用 EmptyState')
   assert.ok(APP.includes('没有匹配的网页应用'), '无匹配空态必须有专门文案')
-  assert.ok(APP.includes('action-label="清空搜索"'), '无匹配空态的按钮应是「清空搜索」')
+  assert.ok(
+    APP.includes(':show-action="false"'),
+    '无匹配空态不应再给按钮（清空走 Esc，与 rdp 一致）'
+  )
+})
+
+test('搜索框美化：胶囊形 + 内嵌放大镜 + 限宽 400px（与 extensions/rdp 逐项一致）', () => {
+  // 1) 结构：字段容器内有大镜图标 + 输入框
+  assert.ok(APP.includes('class="search"'), '必须有 .search 容器')
+  assert.ok(APP.includes('class="search__field"'), '必须有 .search__field 容器')
+  assert.ok(APP.includes('class="search__icon"'), '必须有放大镜图标')
+  assert.ok(
+    APP.includes('stroke="currentColor"'),
+    '放大镜必须用 currentColor（色值只由 CSS token 决定，SVG 里不许写色值）'
+  )
+  // 2) 样式关键值
+  assert.match(
+    STYLES,
+    /\.search\s*\{[^}]*padding:\s*20px 20px 0/,
+    '.search 的左右内边距须与 .app__grid 一致'
+  )
+  assert.match(
+    STYLES,
+    /\.search__field\s*\{[^}]*max-width:\s*400px/,
+    '.search__field 必须限宽 400px'
+  )
+  assert.match(
+    STYLES,
+    /\.search__icon\s*\{[^}]*color:\s*var\(--fg-dim\)/,
+    '放大镜默认色必须是 --fg-dim'
+  )
+  assert.match(
+    STYLES,
+    /\.search__field:focus-within \.search__icon\s*\{[^}]*color:\s*var\(--accent\)/,
+    '聚焦时放大镜必须转 --accent'
+  )
+  // 3) **层叠坑**：必须是 `.search .search__input`（0,2,0），不能是单类（0,1,0）
+  assert.match(
+    STYLES,
+    /\.search \.search__input\s*\{[^}]*border-radius:\s*999px/,
+    '必须用 .search .search__input 才能压过后面的 .input（靠特异度，不靠顺序）'
+  )
+  assert.match(
+    STYLES,
+    /\.search \.search__input\s*\{[^}]*padding-left:\s*30px/,
+    '左内边距要给图标让位'
+  )
+  assert.match(STYLES, /\.search \.search__input\s*\{[^}]*min-height:\s*32px/, '高度 32px')
+  // 不允许退回旧的单类写法（那会被 .input 覆盖）
+  assert.ok(
+    !/^\s*\.search__input\s*\{/m.test(STYLES),
+    '不得出现单类 `.search__input {`（会被后面的 .input 覆盖）'
+  )
 })
 
 test('反向用例：源码里不得出现 SingletonLock（Windows 上不存在该文件）', () => {

@@ -120,33 +120,60 @@ body {
   gap: 8px;
 }
 
-/* 搜索区：列表之上、整行铺开（窄窗下换成上下两行也不破版） */
-.app__search {
+/*
+ * 搜索框（v1.0.2）：卡片网格**上方**一行。只写布局属性——输入框复用既有 `.input`
+ * （底色/描边/字号全走宿主 token，本文件依旧零色彩字面量）。
+ *
+ * 观感（用户反馈"输入框太丑"+ 要求"两个扩展外观必须一致"后定的形态，
+ * 与 `extensions/rdp/src/styles.css:144-196` **逐项对齐**）：
+ * **胶囊形（border-radius: 999px，与既有 `.badge` 同口径）+ 内嵌放大镜 + 宽度上限 400px**。
+ * 原来的 `width: 100%` 会让它在 1000px 窗口下变成一条近千像素的通栏扁矩形，像一行空表单；
+ * 限宽后左右内边距仍与 `.app__grid` 一致（20px）⇒ 输入框左边缘与卡片左边缘对齐，
+ * 窄窗口下 `flex` 自动收窄（`max-width` 是上限，不是固定宽）。
+ */
+.search {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+  padding: 20px 20px 0;
 }
 
-/* 输入框沿用模态框里的 `.input` 观感，只额外撑满剩余宽度 */
-.app__search-input {
+.search__field {
+  position: relative;
+  display: flex;
+  align-items: center;
   flex: 1 1 auto;
+  max-width: 400px;
   min-width: 0;
 }
 
-/* `type="search"` 的原生清除按钮在深色主题下不随宿主 token，隐藏它（我们有自己的「清空」） */
-.app__search-input::-webkit-search-cancel-button {
-  appearance: none;
+/* 放大镜：颜色由 CSS token 决定（SVG 里是 `stroke="currentColor"`），聚焦时亮成强调色 */
+.search__icon {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  width: 14px;
+  height: 14px;
+  color: var(--fg-dim);
+  transform: translateY(-50%);
+  /* 图标在输入框上面，别把点击吞掉（点哪儿都该聚焦到输入框） */
+  pointer-events: none;
 }
 
-@media (max-width: 520px) {
-  .app__search {
-    flex-wrap: wrap;
-  }
+.search__field:focus-within .search__icon {
+  color: var(--accent);
+}
 
-  .app__search-input {
-    flex: 1 1 100%;
-  }
+/*
+ * 选择器写成 `.search .search__input`（0,2,0）而不是单个 `.search__input`（0,1,0）：
+ * `.input` 的规则在本文件**后面**（表单区），同特异度下后者会覆盖前者，
+ * 圆角与左内边距就会失效——这里必须靠特异度赢，**不能靠顺序**。
+ */
+.search .search__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 32px;
+  /* 左内边距给放大镜让位（10 + 14 + 6） */
+  padding-left: 30px;
+  border-radius: 999px;
 }
 
 .app__heading {
