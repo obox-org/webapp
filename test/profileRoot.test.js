@@ -538,6 +538,7 @@ test('P-14：lib/ 下不得出现第二份根解析实现（防分叉）', () =>
     names,
     [
       'chromeArgs.mjs',
+      'chromeLaunch.mjs',
       'entryFields.mjs',
       'nameSanitize.mjs',
       'profileLimit.mjs',

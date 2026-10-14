@@ -24,38 +24,54 @@ const settings = manifest.contributes?.settings
 const fields = settings?.fields ?? []
 const byKey = Object.fromEntries(fields.map((field) => [field.key, field]))
 
-test('manifest.contributes.settings 存在且形状正确（v1.0.3 起恰好三个设置项）', () => {
+test('manifest.contributes.settings 存在且形状正确（v1.0.4 起恰好四个设置项）', () => {
   assert.ok(settings, 'contributes.settings 必须存在（R17 的设置页）')
   assert.equal(settings.id, 'webapp.settings')
   assert.ok(String(settings.title ?? '').trim(), 'settings.title 必须非空')
   assert.ok(Array.isArray(fields), 'settings.fields 必须是数组')
-  assert.equal(fields.length, 3, '恰好三个设置项（两个 select + 一个 text，不多不少）')
+  assert.equal(
+    fields.length,
+    4,
+    '恰好四个设置项（两个 select + 一个 directory + 一个 status，不多不少）'
+  )
   for (const field of fields) {
     assert.ok(String(field.key ?? '').trim(), '每个字段必须有 key')
     assert.ok(String(field.label ?? '').trim(), `${field.key} 必须有 label`)
     assert.ok(
-      ['text', 'number', 'boolean', 'select'].includes(field.type),
-      `${field.key} 的 type 必须在四类枚举内，实际 ${field.type}`
+      // 1.0.4 用到宿主新增的两种类型：`directory`（输入框 + 浏览按钮）与 `status`（只读展示）
+      ['text', 'number', 'boolean', 'select', 'directory', 'status'].includes(field.type),
+      `${field.key} 的 type 必须在宿主支持的类型内，实际 ${field.type}`
     )
     assert.ok(field.default !== undefined, `${field.key} 必须有 default`)
     assert.ok(String(field.description ?? '').trim(), `${field.key} 必须有 description（一行说明）`)
   }
 })
 
-test('三个键名固定：profileLimitMb / diskCacheMb / profileRoot（且含扩展前缀）', () => {
+test('四个键名固定：profileLimitMb / diskCacheMb / profileRoot / migrationStatus（且含扩展前缀）', () => {
   assert.deepEqual(fields.map((field) => field.key).sort(), [
     SETTING_KEYS.diskCacheMb,
+    SETTING_KEYS.migrationStatus,
     SETTING_KEYS.profileLimitMb,
     SETTING_KEYS.profileRoot
   ])
   for (const field of fields) {
     assert.ok(field.key.startsWith('webapp.'), `${field.key} 必须带 webapp. 前缀`)
   }
+  // ⚠️ 两个键必须独立：写状态绝不能参与"改根"判定
+  assert.notEqual(SETTING_KEYS.profileRoot, SETTING_KEYS.migrationStatus)
 })
 
-test('两个下拉仍是 select、新字段是 text（text 必须有非空 default）', () => {
+test('两个下拉仍是 select、根目录是 directory、状态项是 status（只读）', () => {
   for (const field of fields) {
-    if (field.key === SETTING_KEYS.profileRoot) continue
+    if (field.key === SETTING_KEYS.profileRoot) {
+      assert.equal(field.type, 'directory', 'profileRoot 必须是 directory（1.0.4 起）')
+      continue
+    }
+    if (field.key === SETTING_KEYS.migrationStatus) {
+      assert.equal(field.type, 'status', 'migrationStatus 必须是 status（只读展示，无按钮）')
+      assert.equal(field.options, undefined, 'status 字段不得带 options')
+      continue
+    }
     assert.equal(field.type, 'select', `${field.key} 必须是 select（R-W19）`)
     assert.ok(
       Array.isArray(field.options) && field.options.length > 0,
@@ -68,17 +84,47 @@ test('两个下拉仍是 select、新字段是 text（text 必须有非空 defau
   }
 })
 
-test('webapp.profileRoot：text、默认空串（= 用默认根）、description 必须含卸载语义与迁移语义', () => {
+test('webapp.migrationStatus：status、默认"当前无未完成的迁移"、description 写明只读与不可恢复', () => {
+  const field = byKey[SETTING_KEYS.migrationStatus]
+  assert.equal(field.type, 'status', '必须是宿主新增的 status 类型（只读展示）')
+  assert.equal(field.default, '当前无未完成的迁移', '默认文本必须与 lib 的空闲态文案一致')
+  assert.equal(field.options, undefined, 'status 字段不得带 options')
+  // 文案要能让用户理解"为什么扩展页面看不到迁移信息"以及"覆盖不可恢复"
+  assert.match(field.description, /只读/)
+  assert.match(field.description, /不可恢复/)
+  assert.match(field.description, /迁移/)
+  assert.ok(!/[*_`#]/.test(field.description), 'description 里不得出现 Markdown 标记')
+})
+
+test('webapp.profileRoot：directory、默认空串（= 用默认根）、description 必须含卸载语义与迁移语义', () => {
   const field = byKey[SETTING_KEYS.profileRoot]
-  assert.equal(field.type, 'text', '根目录只能是 text（宿主没有目录选择控件）')
+  // 1.0.4：宿主新增了 `directory` 类型（渲染"可编辑文本框 + 浏览…按钮"，
+  // `src/api/contributions.ts:72-87`），本字段改用它；`text` 会退化成没有目录选择按钮的旧形态
+  assert.equal(field.type, 'directory', '根目录必须是 directory（宿主已支持目录选择控件）')
+  // 默认值必须是空串：**扩展的既有约定**是"空 = 默认根 `<扩展 data>/chrome`"
+  // （`lib/profileRoot.mjs` 的 `normalizeRoot('')` → `kind:'default'`；`helper.cjs` 的
+  // `resolveRoot` 同样把空值解析成 `<cwd>/chrome`）。manifest 里**无法**表达 `<扩展 data>`
+  // 这个运行期路径，因此只能写空串，由 description 说明语义。
   assert.equal(field.default, '', '默认值必须是空串（= 用默认根 `<扩展 data>/chrome`）')
-  assert.equal(field.options, undefined, 'text 字段不得带 options')
+  assert.equal(field.options, undefined, 'directory 字段不得带 options')
   // P4 = A：设置项 description 必须包含卸载语义（四处文案之一）
   assert.match(field.description, /卸载时只有默认目录下的数据会被删除/)
   assert.match(field.description, /需你自行清理/)
-  // 迁移语义
+  // 迁移语义 + 默认值语义（默认值写的是空串，必须由 description 说清"空 = 默认根"）
   assert.match(field.description, /迁移/)
   assert.match(field.description, /绝对路径/)
+  assert.match(
+    field.description,
+    /留空 = 用默认目录/,
+    '必须说明"空 = 默认根"（manifest 无法表达它）'
+  )
+  // 1.0.4 起"改这里 = 自动开始迁移"（§2.6 的触发点）已经成立，description 的说法是准确的；
+  // 同时必须写明"同名冲突会被覆盖且不可恢复"（这是该字段最危险的一条后果）
+  assert.match(field.description, /自动迁移到新目录/, '改根会自动迁移——这条必须与实现一致')
+  assert.match(field.description, /同名数据会被覆盖（不可恢复、无备份）/, '必须写明覆盖不可恢复')
+  // ⚠️ 老宿主（≤ obox v1.0.8）渲染链没有兜底分支（`SettingsView.vue:643-676`），
+  // 对 `directory` 只显示 label + description、**没有输入控件**；处理方式与证据见
+  // `docs/spec/amendments/09-chrome-orphan-launch.md` 的"老宿主兼容"段与 README §3。
   // ⚠️ 这段文字原样进 manifest.json，所以不得出现 Markdown 标记
   assert.ok(!/[*_`#]/.test(field.description), 'description 里不得出现 Markdown 标记')
 })
@@ -180,9 +226,10 @@ test('版本号在五处必须完全一致（manifest / package / lock 顶层 / 
       .join('、')}`
   )
   assert.match(String(unique[0]), /^\d+\.\d+\.\d+$/, '版本必须是合法 semver')
-  // v1.0.3 是本需求的发布版本（amendment 08）；五处一致之外再钉一次具体值，
-  // 避免"五处一起漂到 1.0.4 而没有任何一处改过"这种静默失误
-  assert.equal(unique[0], '1.0.3', `本次发布的版本必须是 1.0.3，实际 ${unique[0]}`)
+  // v1.0.4 是本需求的发布版本（amendment 09：Chrome 孤儿化启动 + 扩展页去掉迁移展示 +
+  // 根目录设置项改为 directory）；五处一致之外再钉一次具体值，
+  // 避免"五处一起漂到 1.0.5 而没有任何一处改过"这种静默失误
+  assert.equal(unique[0], '1.0.4', `本次发布的版本必须是 1.0.4，实际 ${unique[0]}`)
 })
 
 test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {

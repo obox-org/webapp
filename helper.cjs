@@ -19,7 +19,8 @@
  * `profileRootStatus` / `prepareRoot` / `checkRootCandidate` / `migrateRootDir`（规格 §9.5）；
  * 另有 `--selftest`（不真的启动 Chrome）。
  *
- * **能力边界**（规格 §9.7 / §16）：只做「探测 Chrome + 按白名单参数 spawn + 在**生效 profile 根**
+ * **能力边界**（规格 §9.7 / §16）：只做「探测 Chrome + 按白名单参数经 `cmd /c start` **以孤儿进程**
+ * 派发 + 在**生效 profile 根**
  * 之内做目录读写」。不接受任意命令行透传（`launch` 的 5 条校验），不接受任意路径
  * （所有 profile 方法只收**单层目录名**；根由入参 `root` 决定，缺省 = `<cwd>/chrome`，
  * 与 1.0.2 逐字一致）。
@@ -71,6 +72,8 @@ const TRASH_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const PROFILE_LIMIT_URL = pathToFileURL(join(__dirname, 'lib', 'profileLimit.mjs')).href
 /** `lib/profileRoot.mjs`（根校验 / 标记 / 迁移判据的**唯一**实现，助手与扩展入口共用） */
 const PROFILE_ROOT_URL = pathToFileURL(join(__dirname, 'lib', 'profileRoot.mjs')).href
+/** `lib/chromeLaunch.mjs`（`cmd /c start` 的参数数组构造与护栏，规格见 amendment 09） */
+const CHROME_LAUNCH_URL = pathToFileURL(join(__dirname, 'lib', 'chromeLaunch.mjs')).href
 
 /** 惰性加载纯模块（CJS 不能静态 import ESM；用绝对 URL 避免 cwd 影响） */
 let profileLimitModule = null
@@ -83,6 +86,13 @@ let profileRootModule = null
 async function profileRootLib() {
   if (!profileRootModule) profileRootModule = await import(PROFILE_ROOT_URL)
   return profileRootModule
+}
+
+/** 同上，惰性加载 `lib/chromeLaunch.mjs` */
+let chromeLaunchModule = null
+async function chromeLaunch() {
+  if (!chromeLaunchModule) chromeLaunchModule = await import(CHROME_LAUNCH_URL)
+  return chromeLaunchModule
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +467,18 @@ async function probe(params = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// launch（参数白名单 + spawn）
+// launch（参数白名单 + 经 cmd /c start 的孤儿进程派发）
 // ---------------------------------------------------------------------------
+
+/**
+ * `cmd /c start` 派发的兜底超时（毫秒）。
+ *
+ * 真机实测（与 `extensions/rdp` 同款机制）：`cmd` 派发后**立即**自己退出（正常路径几十毫秒，
+ * 冷启动/杀软扫描时最长几百毫秒），15s 是 16× 以上余量。必须有兜底：
+ * `start` 的**目标程序名解析失败**时会弹「选择打开方式」对话框并**挂住 cmd 不退出**
+ * （rdp 那边实测 ≥8s 不退），没有超时就会留下僵尸 cmd + 一个永不返回的 IPC 调用。
+ */
+const START_TIMEOUT_MS = 15_000
 
 /** `launch` 允许出现的参数名前缀（规格 §11.2 第 3 条；`--app` 单独处理） */
 const ALLOWED_ARG_PREFIXES = [
@@ -603,7 +623,77 @@ function validateLaunchArgs(rawArgs, root) {
 }
 
 /**
- * `launch { args, root? }`：探测 Chrome → 校验白名单 → `spawn(exe, args)` detached 并 unref。
+ * 派发 `cmd /c start "" <chrome.exe> <参数…>` 并等 `cmd` 退出。**退出码 0 即成功**。
+ *
+ * ⚠️ `windowsVerbatimArguments: false` 是**刻意的**（本文件另一个 `spawn` 场景——
+ * cmdkey 用 `true`——不能照抄过来）：
+ *   - `cmdkey` 用的是**它自己的土解析器**，所以那一边必须传 `true`（参数我们自己拼好、原样传）；
+ *   - `cmd.exe` 用的是**标准命令行解析器**，Node 在 `false` 下的转义（含空白的参数整体加引号）
+ *     正是我们要的。改成 `true` 后，`C:\Program Files\…\chrome.exe` 与含空格的 URL 会在空格处
+ *     被 `start` 拆成多个 token，而 `cmd` **仍然 exit 0** ⇒ 静默走错
+ *     （单测全绿也发现不了，因为单测不启动真 cmd）。
+ * 理由与真机实测见 `lib/chromeLaunch.mjs` 文件头、`docs/spec/amendments/09-chrome-orphan-launch.md`。
+ *
+ * `detached: true`（助手若在 cmd 退出前被杀也不连带终止它）、`stdio: 'ignore'`
+ * （不需要 cmd 的输出，错误从退出码/error 事件来）、`windowsHide: true`（cmd 是控制台程序，
+ * 别让窗口闪一下）。`shell` 不设：我们自己就是 `cmd.exe`，再加一层只会多一层解析。
+ *
+ * @param {string[]} args `buildStartArgs()` 的产物（`['/c','start','',<chrome.exe>,...参数]`）
+ * @returns {Promise<void>} 成功（退出码 0）时 resolve
+ */
+function startViaCmd(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('cmd.exe', args, {
+      windowsVerbatimArguments: false, // 见上：不要照抄 cmdkey 那处的 true
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill() // 不留僵尸 cmd（`start` 目标不存在时会挂住不退）
+      reject(new Error(`[launch-timeout] 派发 Chrome 超时（cmd ${START_TIMEOUT_MS}ms 未返回）`))
+    }, START_TIMEOUT_MS)
+
+    child.once('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(new Error(`[spawn-failed] 启动 Chrome 失败：${err.message}`))
+    })
+    child.once('close', (code, signal) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (code === 0) {
+        resolve()
+        return
+      }
+      if (code === null) {
+        reject(new Error(`[spawn-failed] 启动 Chrome 失败：cmd 被信号 ${signal ?? '未知'} 终止`))
+        return
+      }
+      reject(new Error(`[spawn-failed] 启动 Chrome 失败：cmd 退出码 ${code}`))
+    })
+    child.unref()
+  })
+}
+
+/**
+ * `launch { args, root? }`：探测 Chrome → 校验白名单 → **经 `cmd /c start` 以孤儿进程派发**。
+ *
+ * ⚠️ **不再 `spawn(exe, args, { detached: true })`**：那会让 Chrome 挂在助手的进程树下
+ * （`obox.exe → 助手 node → chrome.exe`）。现在 `cmd` 派发完就退出 ⇒ Chrome **不是**本助手
+ * （也不是 obox）的后代，关掉 obox 不会带走已经打开的站点窗口。
+ * 机制、三个不能改的点、逐参数护栏与代价见 `lib/chromeLaunch.mjs` 与
+ * `docs/spec/amendments/09-chrome-orphan-launch.md`。
+ *
+ * **成功判据 = `cmd` 退出码 0**，因此回包里的 `pid` **恒为 null**（Chrome 不是我们的子进程，
+ * 拿不到 pid；字段保留只是为了不改既有契约）。**代价**：退出码 0 只证明"命令已派发"，
+ * **不证明 Chrome 真的起来了**（Chrome 单实例会把参数转交给既有实例后自己 exit 0，这也正是本扩展
+ * 的既有行为，见 README §4 第 1 条）——所以调用方的文案不能承诺"已打开窗口"。
  *
  * ⚠️ **不接受 `exe` 入参**：只可能启动探测到的 Chrome（规格 §16 的硬要求——绝不回退 Edge，
  * 也不接受任意可执行文件）。
@@ -621,17 +711,21 @@ async function launch(params = {}) {
   }
 
   const exe = detected.chrome.path
-  // 参数以**数组**交给 spawn（不让 shell 参与，也不自己拼命令行字符串）
-  const child = spawn(exe, args, { detached: true, stdio: 'ignore' })
-  const pid = await new Promise((resolve, reject) => {
-    child.once('spawn', () => resolve(child.pid))
-    child.once('error', (err) =>
-      reject(new Error(`[spawn-failed] 启动 Chrome 失败：${err.message}`))
-    )
-  })
-  child.unref()
+  // ① 目标程序必须先存在：`start` 解析不到程序名时会弹「选择打开方式」并**挂住 cmd 不退出**，
+  //    靠 15s 超时兜太晚也太吵（探测与派发之间有竞态：探测到之后被卸载/改名仍可能发生）
+  if (!existsSync(exe)) {
+    throw new Error(`[chrome-not-found] 未找到 Chrome（探测到 ${exe}，但派发前它已不存在）`)
+  }
+
+  // ② 参数护栏（`%VAR%` / 双引号 / 换行 ⇒ 在这里就抛，不派发）：**逐个参数**检查，
+  //    不能只查 `--app=`（`--user-data-dir` 里的 `%VAR%` 会让 profile 被静默写到别的目录）
+  const { buildStartArgs } = await chromeLaunch()
+  const argv = buildStartArgs(exe, args)
+
+  // ③ 经 cmd 派发并等退出码
+  await startViaCmd(argv)
   return {
-    pid,
+    pid: null,
     exe,
     profileDir: userDataDir,
     chromeSource: detected.chrome.source,
@@ -1523,6 +1617,9 @@ function isInvalidParamsMessage(message) {
     '单个参数过长',
     'args[0]',
     'args 必须包含',
+    // `lib/chromeLaunch.mjs` 的派发护栏（`%VAR%` / 引号 / 换行 / 空参数）属于**参数非法**，
+    // 不是底层故障：调用方拿着这份参数改一下就能过，因此归 `-32602`
+    '无法安全派发',
     'cleanCaches',
     '[profile-root-invalid]',
     '[profile-root-candidate-invalid]',
@@ -1718,6 +1815,33 @@ async function selftest() {
     )
     assert.throws(() => assertProfileName('a/b'), /分隔符/)
     assert.throws(() => assertProfileName('..'), /非法/)
+
+    // ②b `cmd /c start` 的参数数组与护栏（纯函数，**不 spawn**；与 rdp 的 mstscArgs 同源同护栏）
+    const { buildStartArgs } = await chromeLaunch()
+    const fakeExe = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+    assert.deepEqual(buildStartArgs(fakeExe, ['--app=https://a/']), [
+      '/c',
+      'start',
+      '',
+      fakeExe,
+      '--app=https://a/'
+    ])
+    assert.equal(buildStartArgs(fakeExe, ['--app=https://a/'])[2], '', '窗口标题占位不得丢')
+    // 放行：空格 / 中文 / cmd 元字符 / **不配对**的单个 %（真机实测原样到达）
+    for (const arg of [
+      '--app=https://a/b c',
+      '--user-data-dir=D:\\obox 数据\\会话',
+      '--app=https://a/b&c',
+      '--app=https://a/100% done'
+    ]) {
+      assert.equal(buildStartArgs(fakeExe, [arg])[4], arg, `${arg} 必须原样通过`)
+    }
+    // 拒绝：%VAR% / 双引号 / 换行 / 空参数
+    assert.throws(() => buildStartArgs(fakeExe, ['--app=https://a/%TEMP%/b']), /%VAR%/)
+    assert.throws(() => buildStartArgs(fakeExe, ['--app=https://a/b"c']), /引号或换行/)
+    assert.throws(() => buildStartArgs(fakeExe, ['--app=https://a/b\nc']), /引号或换行/)
+    assert.throws(() => buildStartArgs(fakeExe, ['  ']), /空串/)
+    assert.throws(() => buildStartArgs('', ['--app=https://a/']), /绝对路径/)
 
     // ③ profileStatus + 体积统计（含 TTL 缓存命中与 cacheBytes）
     const status = await profileStatus({ name: '示例站点' })

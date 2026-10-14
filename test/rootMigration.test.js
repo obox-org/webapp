@@ -5,9 +5,13 @@
  * 为什么不给 `index.js` 引入宿主 mock：既有仓库对入口一律读源码（`ipcSurface.test.js:1-16`
  * 记录了原因），引 mock 会让门禁风格分裂（规格 §14.5 的裁定）。
  *
- * ⚠️ 这是**数据安全**的门禁：这里断言的每一条（唯一写点、不默认覆盖、无备份、意图文件位置）
- * 都对应一个"错了就永久丢数据"的实现细节。纯逻辑由 `test/profileRoot.test.js` 覆盖，
- * 进程行为由 `test/helper.test.js` 覆盖，本文件补的是"入口真的把它们接上了"。
+ * ⚠️ 这是**数据安全**的门禁：这里断言的每一条（改根唯一写点、覆盖必须走显式确认记录 + 逐条留痕、
+ * 无备份、意图文件位置）都对应一个"错了就永久丢数据"的实现细节。纯逻辑由 `test/profileRoot.test.js`
+ * 覆盖，进程行为由 `test/helper.test.js` 覆盖，本文件补的是"入口真的把它们接上了"。
+ *
+ * ⚠️ **1.0.4 的政策变化（用户决策，amendment 09 §2）**：冲突不再等界面确认，改为**自动覆盖**
+ * （先删目标同名目录再搬源、不可恢复）。I-6 因此从"未确认 ⇒ 不动手"改写为
+ * "自动覆盖，但必须留下显式确认记录与逐条日志"——**结构的闸门没拆，只是确认来源变了**。
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -57,17 +61,32 @@ test('I-2：迁移编排存在，且意图文件名与"唯一写点"都对', () 
   }
   assert.match(INDEX_CODE, /ROOT_INTENT_REL/, '意图文件名必须是常量（单一来源）')
   assert.match(INDEX_CODE, /ROOT_INTENT\b/, '常量必须来自 lib/profileRoot.mjs 的 ROOT_INTENT')
-  // 唯一写点：`api.settings.set` 恰好 3 处（迁移完成 / 放弃回写 / 无存量条目）
-  const writes = [...INDEX_CODE.matchAll(/api\.settings\.set\(/g)]
-  assert.equal(writes.length, 3, `api.settings.set 必须恰好 3 处，实际 ${writes.length}`)
+  // **改根的唯一写点**：写 `profileRoot` 恰好 3 处（迁移完成 / 放弃回写 / 无存量条目）。
+  // ⚠️ 1.0.4 起 `api.settings.set` 还有**另一类**调用——写只读的 `migrationStatus`
+  // （迁移过程状态）与默认根回填（`profileRoot`，但语义是"把默认根写成绝对路径"）。
+  // 因此判据必须**按 key** 数，而不是按 `api.settings.set` 的出现次数：
+  const rootWrites = [...INDEX_CODE.matchAll(/api\.settings\.set\(\s*SETTING_KEYS\.profileRoot/g)]
+  assert.equal(
+    rootWrites.length,
+    5,
+    `写 profileRoot 必须恰好 5 处（完成 / 放弃回写 / 无存量条目 / 默认根回填 / 迁移中改根的回写），实际 ${rootWrites.length}`
+  )
   const completeAt = INDEX_CODE.indexOf('advanceMigrationState(current)')
-  const setAfter = INDEX_CODE.indexOf('api.settings.set', completeAt)
+  const setAfter = INDEX_CODE.indexOf(
+    'api.settings.set(SETTING_KEYS.profileRoot, current.to)',
+    completeAt
+  )
   assert.ok(
     completeAt > 0 && setAfter > completeAt,
     '写设置必须排在"全部完成"判定（advanceMigrationState）之后'
   )
   // 有 failed 时不得写设置：`state.writable` 为假就直接 return
   assert.match(INDEX_CODE, /if \(!state\.writable\)/, '不可写时必须提前返回（不写设置）')
+  // 状态项写入必须**只**写 migrationStatus 键，且经纯函数的文本（见 test/migrationStatus.test.js）
+  const statusWrites = [
+    ...INDEX_CODE.matchAll(/api\.settings\.set\(\s*SETTING_KEYS\.migrationStatus/g)
+  ]
+  assert.equal(statusWrites.length, 1, 'status 文本必须只有一个写入点（writeMigrationStatus）')
 })
 
 test('I-3：顺序与互斥 —— 先根迁移后改名；迁移中禁止改名与再次改根', () => {
@@ -112,70 +131,109 @@ test('I-4：意图文件经 api.fs 写在 data 目录（**不得**写进根里�
   assert.match(INDEX_CODE, /catch \{\s*return null\s*\}/, '读意图必须容错（不完整 JSON ⇒ null）')
 })
 
-test('I-6：覆盖确认**不可绕过**（有冲突且未确认 ⇒ 不进入逐目录搬运）', () => {
+test('I-6（1.0.4 修订）：冲突**自动覆盖**，但"覆盖"仍必须走显式确认记录 + 逐条留痕', () => {
+  // ⚠️ **语义变化（用户决策，amendment 09 §2）**：界面不再有覆盖确认框，冲突改为
+  // **按用户已接受的策略自动覆盖**（先删目标同名目录再搬源、不可恢复）。
+  // 因此本用例从"未确认 ⇒ 不动手"改成断言下面四条**新的**数据安全要求：
+  //   ① 冲突仍必须**逐条预检**（`action: 'probe'`，只读，任何删除之前）；
+  //   ② "确认"仍必须**显式落进意图**（`confirmedAt` + `confirmedBy: 'auto-overwrite'` + 逐条 `names`），
+  //      不允许出现"没有确认记录也直接 overwrite"的写法；
+  //   ③ 每一处 `overwrite: true` 都必须挂在**名字清单**上（声明的或自动确认的），不得无条件置位；
+  //   ④ 覆盖必须**逐条留痕**（日志里写明"自动覆盖（不可恢复）"）。
   const startFn = INDEX_CODE.slice(
     INDEX_CODE.indexOf('async function startRootMigration('),
     INDEX_CODE.indexOf('async function resolveRootMigration(')
   )
-  // 冲突预检存在（真正的调用点在 `probeItem`，startRootMigration 通过它逐条探测）
   assert.match(INDEX_CODE, /async function probeItem\(/, '必须有逐条探测函数')
   assert.match(INDEX_CODE, /action: 'probe'/, '探测必须用 action=probe（只读）')
   assert.match(startFn, /await probeItem\(intent, item\.name\)/, 'startRootMigration 必须逐条预检')
   assert.match(startFn, /conflicts\.push/, '必须收集冲突清单')
-  // 未确认 ⇒ 直接返回 needsConfirm，**且在写意图/搬运之前**
-  const guardAt = startFn.indexOf('needsConfirm: true')
-  const writeAt = startFn.indexOf('await writeRootIntent(intent)')
-  assert.ok(guardAt > 0 && writeAt > guardAt, '未确认的返回必须早于写意图（不动手）')
-  assert.match(
-    startFn,
-    /if \(conflicts\.length && !confirmOverwrite && !conflictsConfirmed\(intent\.conflicts, conflicts\)\)/,
-    '闸门条件必须是"有冲突 + 未显式确认 + 确认记录不覆盖当前冲突集"'
-  )
-  // 确认记录必须带 confirmedAt 与逐条 names，且只有在那之后才置 overwrite
+  // ② 自动确认也必须是"显式记录"，且必须能看出确认来源是自动策略而非用户
   assert.match(startFn, /confirmedAt: now/, '确认必须记录时刻')
-  assert.match(startFn, /confirmedBy: 'user'/, '确认只能由用户做出')
-  // ⚠️ **闸门的数据安全核心**：确认清单的**唯一来源**是调用方传进来的 `params.names`
-  // （= 用户在确认框里逐条看到的那份），**不得**用"服务端当前扫到的 conflicts"顶上——
-  // 否则调用方只要多传一个 `confirmOverwrite: true`，就等于替用户确认了他没看过的冲突。
   assert.match(
     startFn,
-    /const confirmedNames = Array\.isArray\(params\?\.names\)/,
-    '确认清单必须来自入参 params.names（用户看过的那份）'
-  )
-  assert.ok(
-    !/names: \[\.\.\.conflicts\]/.test(startFn),
-    '不得把"服务端扫描结果"直接当成用户确认的清单'
+    /'auto-overwrite'/,
+    '自动覆盖必须留下 confirmedBy: auto-overwrite 的来源标记'
   )
   assert.match(
-    startFn,
-    /conflicts: \{ confirmedAt: now, confirmedBy: 'user', names: confirmedNames \}/,
-    '意图里记录的必须是被声明看过的那份清单'
+    INDEX_CODE,
+    /async function autoConfirmOverwrite\(/,
+    '续做路径必须有自动确认覆盖的落点（否则收尾判定会把冲突当"未确认"）'
   )
+  assert.match(INDEX_CODE, /confirmedBy: 'auto-overwrite'/, '自动确认必须写进意图的 conflicts 记录')
+  // ③ 每一处 overwrite: true 都必须按名字清单逐条置位
+  // （声明的清单 / 续做确认的清单 / 自动确认覆盖时的冲突名）
+  const overwriteLiterals = [...INDEX_CODE.matchAll(/overwrite: true/g)]
+  assert.ok(overwriteLiterals.length >= 3, `overwrite:true 应有多处（每条清单各一处）`)
+  for (const line of INDEX_CODE.split('\n').filter((text) => text.includes('overwrite: true'))) {
+    assert.match(
+      line,
+      /confirmedNames\.includes\(item\.name\)|names\.includes\(item\.name\)|autoNames\.includes\(item\.name\)|String\(item\?\.name\) === String\(name\)/,
+      `overwrite:true 必须按"确认过的名字"逐条置位，实际：${line.trim()}`
+    )
+  }
+  assert.ok(!/overwrite\s*=\s*true/.test(INDEX_CODE), '不得有"默认就把 overwrite 置 true"的赋值')
+  // 调用方显式声明过确认的老路径仍然要校验"声明覆盖了当前冲突集"（防止被当成万能开关）
   assert.match(
     startFn,
     /const covered = conflictsConfirmed\(/,
-    '必须校验"声明看过的清单"覆盖了当前冲突集'
+    '声明式确认仍必须校验清单覆盖当前冲突集'
   )
-  assert.match(startFn, /overwrite: true/, '确认后才置 overwrite')
-  // 续做路径的强制复确认
+  assert.match(startFn, /names: declaredNames \}/, '被校验的清单必须来自调用方声明的 names')
+  assert.ok(
+    !/names: \[\.\.\.conflicts\]/.test(startFn),
+    '不得把"服务端扫描结果"直接当成用户声明过的清单'
+  )
+  // ④ 逐条留痕：日志里必须出现"自动覆盖（不可恢复）"
+  assert.match(INDEX_CODE, /自动覆盖（不可恢复）/, '覆盖是不可恢复的删数据动作，必须逐条写日志')
+  // 续做路径的确认动作仍在（状态机不改），没有待确认项时才降级为"继续"
   const resolveFn = INDEX_CODE.slice(INDEX_CODE.indexOf('async function resolveRootMigration('))
   assert.match(resolveFn, /confirm-overwrite/, '必须有显式的确认动作')
   assert.match(resolveFn, /pendingConflicts\(intent\)/, '没有待确认项时才降级为"继续"')
   // 助手侧不得自行决定覆盖：`overwrite` 由扩展侧传入且来源于意图记录
   assert.match(INDEX_CODE, /overwrite: overwriting/, 'overwrite 必须由扩展侧显式传入')
-  // 不得出现"默认覆盖"的写法：`overwrite` 只在**用户确认后**被置 true
-  // （两处落点：`startRootMigration` 的 confirmOverwrite 分支、`resolveRootMigration` 的
-  //  `confirm-overwrite` 分支），且都必须挂在**用户声明的清单**上
-  const overwriteLiterals = [...INDEX_CODE.matchAll(/overwrite: true/g)]
-  assert.equal(overwriteLiterals.length, 2, `overwrite:true 必须恰好出现在两个确认分支里`)
-  for (const line of INDEX_CODE.split('\n').filter((text) => text.includes('overwrite: true'))) {
-    assert.match(
-      line,
-      /confirmedNames\.includes\(item\.name\)|names\.includes\(item\.name\)/,
-      `overwrite:true 必须按"用户声明确认过的名字"逐条置位，实际：${line.trim()}`
-    )
-  }
-  assert.ok(!/overwrite\s*=\s*true/.test(INDEX_CODE), '不得有"默认就把 overwrite 置 true"的赋值')
+})
+
+test('I-10（1.0.4）：设置页改根 = 迁移的触发点（与「迁移到此目录」同一个状态机入口）', () => {
+  // 用户决策：扩展页面不再有迁移按钮 ⇒ "用户选了新目录"由设置变更通知驱动。
+  // 判据在纯函数 `planRootChangeTrigger`（矩阵见 `test/migrationStatus.test.js`），
+  // 这里只断言"入口真的把它接上了"，且**没有**因为补触发点而绕过既有护栏。
+  assert.match(INDEX_CODE, /planRootChangeTrigger/, '必须复用纯函数判据')
+  assert.match(INDEX_CODE, /async function onProfileRootSettingChanged\(/, '必须有触发点处理函数')
+  assert.match(
+    INDEX_CODE,
+    /void onProfileRootSettingChanged\(\)/,
+    'onChanged(profileRoot) 必须调用它（同一条订阅里仍要作废体积缓存）'
+  )
+  // 状态机入口必须是**同一个** `startRootMigration`（自动覆盖、prepareRoot、冲突预检都在里面）
+  const handler = (() => {
+    const start = INDEX_CODE.indexOf('async function onProfileRootSettingChanged(')
+    const open = INDEX_CODE.indexOf('{', start)
+    let depth = 0
+    for (let i = open; i < INDEX_CODE.length; i += 1) {
+      if (INDEX_CODE[i] === '{') depth += 1
+      else if (INDEX_CODE[i] === '}') {
+        depth -= 1
+        if (depth === 0) return INDEX_CODE.slice(open, i + 1)
+      }
+    }
+    return ''
+  })()
+  assert.ok(handler.length > 0, '必须能定位到触发点处理函数体')
+  assert.match(handler, /await startRootMigration\(/, '必须调既有的 startRootMigration')
+  assert.ok(
+    !/prepareRoot|migrateRootDir|createRootIntent|writeRootIntent/.test(handler),
+    '不得在触发点里自己拼一套迁移（必须走同一个状态机入口）'
+  )
+  // 迁移进行中不得叠开：拒绝分支里不得出现 startRootMigration
+  // ⚠️ 边界用**运行期字符串**，不用注释：INDEX_CODE 是剥掉注释后的源码
+  const rejectAt = handler.indexOf('if (!plan.trigger)')
+  const noticeAt = handler.indexOf('改根被拒绝：已有迁移进行中')
+  assert.ok(rejectAt > 0 && noticeAt > rejectAt, '必须能区分"拒绝分支"与"正常路径"')
+  assert.ok(
+    !handler.slice(rejectAt, noticeAt).includes('startRootMigration'),
+    '拒绝分支不得开始新迁移'
+  )
 })
 
 test('I-7：**无备份**（反向门禁）——覆盖前不得先留一份', () => {
@@ -247,11 +305,20 @@ test('编排状态机的纯逻辑（把 index.js 的循环用同一批纯函数�
   assert.equal(conflictsConfirmed(intent.conflicts, ['C']), false, '未写入确认记录 ⇒ 视为未确认')
 })
 
-test('单条目决策在"目标已存在且未确认"时一定返回 skipped（编排层据此跳过）', () => {
+test('单条目决策在"目标已存在且未确认"时一定返回 skipped（编排层据此自动确认后才覆盖）', () => {
   const decided = decideMigrationItem({ exists: true }, { exists: true }, { overwrite: true })
   assert.equal(decided.action, 'skipped')
   assert.equal(decided.reason, '未确认覆盖')
-  // 编排层把 skipped 写进意图后，该条目**不再**尝试搬运（下一轮仍然是 skipped 直到用户确认）
+  // ⚠️ 1.0.4：编排层在**真正动手之前**就把冲突记成自动确认（`autoConfirmOverwrite`），
+  // 因此"未确认"这条分支在编排路径上不可达——但判据本身**不得**放宽（纯函数仍是
+  // "确认过才允许覆盖"），这样"自动确认"始终是一处**显式**的记录，而不是隐式的默认行为。
+  const confirmed = decideMigrationItem(
+    { exists: true },
+    { exists: true },
+    { overwrite: true, confirmed: true }
+  )
+  assert.equal(confirmed.action, 'overwritten')
+  // 编排层把 skipped 写进意图后，该条目**不再**尝试搬运
   const intent = createRootIntent({
     from: 'C:\\a',
     to: 'D:\\b',

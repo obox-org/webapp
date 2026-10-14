@@ -501,6 +501,8 @@ node skills/obox-ext-dev/scripts/validate-manifest.mjs extensions/webapp/manifes
 | `probe`           | `{}`                         | `{ cwd, node, electron, runAsNode, chrome: { path, source, version }, chromeCandidates: [...] }` | 通道失败时把 `[code] message` 透出                                   |
 | `profileInfo`     | `{ id }`                     | `{ profileDir, exists, locked: boolean, sizeBytes?: number }`                                    | 条目不存在时 `网页应用不存在（可能已被删除），请刷新列表`            |
 
+> ⚠️ **`open` 的返回契约已被 [amendment 09](amendments/09-chrome-orphan-launch.md) 修订（1.0.4）**：`data` 里的 `pid` **恒为 `null`**（Chrome 经 `cmd /c start` 以孤儿进程派发，不是我们的子进程，拿不到 pid），字段保留只为不改既有契约；成功判据改为"helper 回包是对象"（helper 失败会抛 `-32603`，走不到那里）。
+
 > **`profileSize` / `cleanCaches` 与 `profileInfo` 的分工（R17）**：
 >
 > - `profileInfo` = **磁盘状态**（目录在不在、是否被占用），用于删除/改名预检与卡片提示；**不返回体积**（体积查询走 `profileSize`，因为它可能很慢，必须能带缓存语义被单独调用）。
@@ -534,6 +536,8 @@ node skills/obox-ext-dev/scripts/validate-manifest.mjs extensions/webapp/manifes
 | `moveProfile`                         | `{ from: string, to: string }`                                              | `{ moved: true, from, to }`                                                                                                                                         | 无                                         | 新增：改名搬目录（R4）。失败抛 `-32603`，message 带 `[profile-move-failed]` 前缀                                                                                                                                                                                                                   |
 | `removeProfile`                       | `{ name: string }`                                                          | `{ removed: boolean, dir: string }`                                                                                                                                 | `deleteCredential`（近似：都不是致命失败） | 新增：删 profile 目录（R13）。占用时抛 `-32603`，message 带 `[profile-busy]` 前缀                                                                                                                                                                                                                  |
 | `--selftest`（CLI 参数，非 RPC 方法） | —                                                                           | 退出码 0/1                                                                                                                                                          | `--selftest`（`helper.cjs:285-316`）       | 照搬形态：不真的启动 Chrome，只验证参数校验与目录操作                                                                                                                                                                                                                                              |
+
+> ⚠️ **`launch` 的返回契约与启动方式已被 [amendment 09](amendments/09-chrome-orphan-launch.md) 修订（1.0.4）**：返回改为 `{ pid: null, exe, profileDir, chromeSource, summary }`——Chrome 经 `cmd /c start` **以孤儿进程**派发（成功判据 = `cmd` 退出码 0），因此拿不到 pid。新增 `lib/chromeLaunch.mjs`（新增库模块）的**逐参数**护栏：任一参数命中 `%VAR%` / 双引号 / 换行 ⇒ `-32602`（`无法安全派发`）；`arguments` 数组形如 `['/c','start','',<chrome.exe 绝对路径>,...白名单参数]`。
 
 **`launch` 的参数校验（助手侧，硬白名单）**：
 
@@ -886,6 +890,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS webapp_name_nocase ON webapp (name COLLATE NOC
 >
 > **可清理集合是白名单，不是黑名单**（§14.5）——只有出现在白名单里的目录名才可能被删，其余一律不动。
 
+> ⚠️ **1.0.4（[amendment 09](amendments/09-chrome-orphan-launch.md) §2.3：覆盖策略的语义变化）**：冲突（目标根下已有同名目录）**不再等界面逐条确认**，改为**自动覆盖**（先删目标同名目录再搬源，**不可恢复、无备份**）；`decideMigrationItem` 的"确认过才允许覆盖"判据**未放宽**，只是确认记录改由扩展落成 `confirmedBy: 'auto-overwrite'`，并逐条写日志、把"已覆盖 N 项（不可恢复）"写进设置页状态项 `webapp.migrationStatus`（见 amendment 09 §3）。
+
 ### 14.2 创建与改名移动（R4）
 
 > ⚠️ **已由 [amendment 08](amendments/08-profile-root.md) 修订（1.0.3）**：新增「迁移期间禁止改名」、「根迁移 intent 在扩展 data 目录（`.pending-move-root.json`）」与「先改根、后改名」的顺序。
@@ -1191,6 +1197,8 @@ Test-Path "$dst\data\webapp.db"; Test-Path "$dst\data\chrome"
 
 ### 15.2 webapp 特有的字段与提示
 
+> ⚠️ **1.0.4（[amendment 09](amendments/09-chrome-orphan-launch.md)）：界面上与"浏览器数据迁移"有关的一切展示与操作已移除**——迁移状态行（含进度 X/Y 与「继续 / 放弃」）、未受管目录警示行、覆盖确认框（`ConfirmOverwrite.vue` 已删）、扩展页的「浏览…」+ 手填根目录输入框。迁移只在子窗口挂载时**静默续做**，进度与异常只写控制台；**迁移状态改到设置页的只读 `status` 项 `webapp.migrationStatus`**（见 amendment 09 §3）。**本节其它"界面提示"（TLS 降级标记、删除确认文案、字段级红字、体积行、下拉渲染门禁）逐条不变**；设置页的「浏览器数据根目录」字段类型由 `text` 改为宿主新增的 `directory`（目录选择控件），默认值仍为空串（= 默认根 `<扩展 data>/chrome`），**并在为空时由扩展回填默认根的真实绝对路径**（见 amendment 09 §4）。两项新字段类型都要求 **obox ≥ 1.0.9**。
+
 **字段集（`src/fields.js` 的 `COMMON_GROUPS`）**：
 
 | key            | 标签         | 类型                   | 必填 | 说明行（`desc`，一行）                                                         | 校验         |
@@ -1422,6 +1430,8 @@ Test-Path "$dst\data\webapp.db"; Test-Path "$dst\data\chrome"
 | `launch` 真启动（真机验收里跑，单测默认 `skip`） | 用真实 Chrome + 临时 `--user-data-dir` 启动 → 返回 `pid > 0`；随即 `taskkill /pid` 清理                                                                                                                                                                                                                                                 |
 | stdin 关闭                                       | 助手自行退出，退出码 0                                                                                                                                                                                                                                                                                                                  |
 | stdout 纯净                                      | 整个会话里 stdout 的每一行都能 `JSON.parse`（协议帧纯净性门禁）                                                                                                                                                                                                                                                                         |
+
+> ⚠️ **本表里 `launch` 真启动那一行已被 [amendment 09](amendments/09-chrome-orphan-launch.md) 修订（1.0.4）**：判据不再是"返回 `pid > 0` + `taskkill /pid` 清理"（经 `cmd /c start` 派发后拿不到 pid），改为**真机进程树验收**——用 `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'"` 确认 `ParentProcessId` 查不到活进程，再"关掉 obox 后窗口仍在"。步骤见 amendment 09 §5 与 README §4.1。
 
 **`test/helperProfile.test.js`**
 
@@ -2031,7 +2041,7 @@ T7 + T8 → T9 真机验收（§18.3 的 A1–A22 + §18.3.1 的 Chrome 探测�
 - obox 扩展权威文档：`skills/obox-ext-dev/SKILL.md` 与 `references/{workflow,guides-user,manifest-reference,api-reference,themes-settings,troubleshooting}.md`、`scripts/validate-manifest.mjs`、`scripts/create-user-extension.mjs`
 - 宿主源码：`src/api/types.ts`、`src/api/registration.ts`、`src/shared/ipcDeclaration.ts`、`src/main/{ipc,ipcCore,sqlite,sqliteCore,fs,oixCore,capabilities,appWindow,paths,extensionDirs,hookBridge}.ts`、`src/renderer/src/{AppWindow.vue,core/appTheme.ts,core/appStore.ts,core/loader.ts,core/host.ts}`
 - **建议下一步**：D-1…D-5 已全部关闭（§21），**直接进入 `spec-do`** 按 §24 的 01–11 票执行；P6（语言下拉清单）与 P7（上限档位）为待微调项，不阻塞实现。
-- **修订记录**：`amendments/01-close-four-decisions.md`（D-1/D-2/D-3/D-4 与新增需求 R16）、`amendments/02-profile-size-limit.md`（新增需求 R17 / D-5）
+- **修订记录**：`amendments/01-close-four-decisions.md`（D-1/D-2/D-3/D-4 与新增需求 R16）、`amendments/02-profile-size-limit.md`（新增需求 R17 / D-5）、`amendments/05-remove-status-bar.md`（1.0.1 去状态栏）、`amendments/06-search-box.md` + `amendments/07-search-box-beautify.md`（1.0.2 搜索）、`amendments/08-profile-root.md`（1.0.3 可配置根 + 迁移）、`amendments/09-chrome-orphan-launch.md`（**1.0.4：Chrome 孤儿化启动 + 扩展页去掉迁移展示 + 冲突自动覆盖 + 设置页只读状态项 `webapp.migrationStatus` + `profileRoot` 改为 `directory` 并回填默认根**）
 - **本阶段产物**：本文件 `.spec-workflow/webapp-extension/spec.md` + `amendments/01-close-four-decisions.md` + `amendments/02-profile-size-limit.md`（未创建代码、未创建 `issues/**` 独立票文件——票以 §24 的表格形式内嵌在本文件；若用户希望拆成 `issues/01-*.md`…`issues/11-*.md`，可由 `to-spec` 修订模式补写）。
 
 ## 26. 未能核实 / 存疑清单
@@ -2053,4 +2063,7 @@ T7 + T8 → T9 真机验收（§18.3 的 A1–A22 + §18.3.1 的 Chrome 探测�
 | **13（新，R17）** | Chrome 是否**真的**按 `--disk-cache-size` 限制 `Cache/` 体积（以及它在磁盘上的实际落点是否就是 `Default/Cache`） | 真机：设 128 MB → 用大流量站点浏览 → 观察 `data/chrome/<名>/Default/Cache` 体积是否被约束；对照不传该参数时的增长 | 未核实（R17 的"缓存上限"依赖 Chrome 自身实现；即使失效也不影响"目录上限 + 预检 + 只清缓存"这条主链路） |
 | **14（新，R17）** | `cleanCaches` 在**该站点窗口正开着**时的实际失败比例（哪些缓存目录会被占用） | 真机 A27/A29：窗口开着跑全局清理，统计 `skipped[]` 的目录分布与 errno | 未核实（R-W17 已按"失败进 skipped、如实提示、不重试"处理） |
 | **15（新，R17）** | GB 级 profile 在**本机磁盘**上的真实扫描耗时（用于校准 60s TTL 与 120s 超时是否合适） | 真机：对一个 > 1 GB 的真实 profile 连续跑 `profileSize`，记录首次（冷）与命中（热）耗时，落到 `docs/evidence/profile-size-timing.txt` | 未核实（R-W16 已按"只按需扫描 + TTL + 不轮询"处理） |
+| **16（新，amendment 09 / 1.0.4）** | 真的 Chrome 经 `cmd /c start` 派发后的**父进程关系**与"关掉 obox 后站点窗口仍在"；`cmd` 派发的真实耗时分布；企业策略禁 `cmd.exe` 的机器上的行为 | 真机（**必须人工，纯 Node 造不出真进程树**）：`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'"` 查 `ParentProcessId`；再完全退出 obox 看窗口是否仍在。步骤见 amendment 09 §7 与 README §4.1 | **未核实**（发版前必跑；已登记为 amendment 09 的未核实项 1–3） |
+| **17（新，amendment 09 / 1.0.4）** | 宿主新增的 `directory` 与 `status` 字段类型在设置页的真实渲染与写回值（`directory` 的最终交互 = **只读输入框 + 点击即弹目录选择器**，另有「浏览…」按钮供键盘操作）；老宿主（`≤ v1.0.8`）上这两个字段"只显示标题与说明、没有控件"的实际观感 | 真机分别在**新版（≥ 1.0.9）**与**老版** obox 的 设置 → 扩展 → 网页应用 里看「浏览器数据根目录」与「迁移状态」两格：新版应是"只读路径 + 点击弹选择器"与只读文本；老版按 `SettingsView.vue` 的 `v-if/v-else-if` 链**推断**为无控件 | **未核实**（新版渲染与新类型的实现细节本次只读源码；老版观感未复现） |
+| **18（新，amendment 09 / 1.0.4）** | ① **设置页改根 ⇒ 自动开始迁移**（§2.6）的端到端表现，含"迁移中再改根被拒并回写"；② 自动覆盖在"根指向真实 Chrome `User Data` 且条目同名"时的实际破坏面；③ 默认根回填后的"行为不漂移"在真实 `%APPDATA%\obox\…` 路径下 | ① 真机：设置页选新目录 → 看控制台与状态项；再在迁移中选另一个目录 → 看是否被回写（README §4.2 第 5 条 / amendment 09 §7 步骤 ⑦）；② 真机演练（README §7 步骤 ⑥，**危险步骤**）；③ 真机看设置页与卡片文案（步骤 ⑤） | ① **已实现**（纯函数矩阵 + 源码门禁），**真机未验证**；② **风险已知情接受**、未演练；③ 由纯函数矩阵 + 源码门禁覆盖，**真机未验证** |
 ```

@@ -145,12 +145,15 @@ test('classifyCachePath：名字含 cache 但不在白名单的目录一律不�
   }
 })
 
-test('设置键与档位：与 manifest 的 contributes.settings 同源（含第三个 profileRoot 键）', () => {
+test('设置键与档位：与 manifest 的 contributes.settings 同源（1.0.4 起四个键）', () => {
   assert.deepEqual(SETTING_KEYS, {
     profileLimitMb: 'webapp.profileLimitMb',
     diskCacheMb: 'webapp.diskCacheMb',
-    profileRoot: 'webapp.profileRoot'
+    profileRoot: 'webapp.profileRoot',
+    migrationStatus: 'webapp.migrationStatus'
   })
+  // ⚠️ `migrationStatus` 必须是**另一个键**：写它只是显示状态，改根判定只读 `profileRoot`
+  assert.notEqual(SETTING_KEYS.migrationStatus, SETTING_KEYS.profileRoot)
   assert.deepEqual([...PROFILE_LIMIT_MB_VALUES], ['0', '512', '1024', '2048', '4096', '8192'])
   assert.deepEqual([...DISK_CACHE_MB_VALUES], ['-1', '0', '128', '512', '1024'])
   assert.equal(DEFAULT_PROFILE_LIMIT_MB, 2048, '默认 2 GB')

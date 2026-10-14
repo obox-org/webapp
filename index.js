@@ -40,6 +40,7 @@ import {
 } from './lib/profileLimit.mjs'
 import {
   EXT_ID,
+  MIGRATION_STATUS_IDLE,
   ROOT_INTENT,
   advanceMigrationState,
   applyItemResult as applyItemResultPure,
@@ -52,12 +53,16 @@ import {
   formatCardDataDir,
   isMigrationComplete,
   isMigratableIntent,
+  migrationStatusText,
   normalizeRoot,
   pendingConflicts,
+  planDefaultRootBackfill,
+  planRootChangeTrigger,
   progressText,
   resolveEffectiveRoot,
   samePath,
-  summarize
+  summarize,
+  treatAsDefaultRoot
 } from './lib/profileRoot.mjs'
 
 /** App 卡片 id（宿主按它把子窗口消息路由到本扩展） */
@@ -73,7 +78,7 @@ const ROOT_UNMARKED = '[profile-root-unmarked]'
 /** 迁移意图文件的相对路径（**写在扩展 data 目录**，不随根移动；规格 D4 / U-5） */
 const ROOT_INTENT_REL = ROOT_INTENT
 /** 扩展版本（五处一致：manifest / package / package-lock ×2 / 卡片注册） */
-const EXT_VERSION = '1.0.3'
+const EXT_VERSION = '1.0.4'
 /**
  * 「浏览…」的**降级文案**（规格 §7.4 的表；老宿主/能力探测失败时回给界面）。
  * 必须诚实：不承诺"一定能选目录"，并明确告诉用户下一步怎么做。
@@ -247,6 +252,10 @@ export default function webapp(api) {
       connecting = Promise.resolve(api.ipc.connect(CHANNEL_ID))
         .then(() => {
           connected = true
+          // 1.0.4：通道一建立就把默认根的绝对路径回填进设置（幂等、**绝不触发迁移**，见该函数注释）。
+          // 放在这里而不是激活瞬间：宿主不暴露 data 目录路径，唯一的来源是助手（激活即连助手
+          // 会违背本文件"懒连接"的既有纪律，规格 §17）。因此实际时机 = **本进程第一次用助手**。
+          void backfillDefaultRoot()
         })
         .catch((err) => {
           connecting = null
@@ -300,9 +309,16 @@ export default function webapp(api) {
         `[webapp] 设置 ${SETTING_KEYS.diskCacheMb}=${String(cacheRaw)} 不在档位内，已回落 ${cache.mb}`
       )
     }
-    // ⚠️ `api.settings.get` 返回的可能是任意类型（设置项类型是 text，但存储层不保证）⇒ String()
+    // ⚠️ `api.settings.get` 返回的可能是任意类型（设置项类型是 directory，但存储层不保证）⇒ String()
     const profileRoot = rootRaw === undefined || rootRaw === null ? '' : String(rootRaw)
-    const rootVerdict = normalizeRoot(profileRoot)
+    // 1.0.4（amendment 09 §4）：设置里被**回填**成默认根的绝对路径时，先按"它就是默认根"判一次。
+    // 为什么必须放在 `normalizeRoot` 之前：真实默认根是 `%APPDATA%\obox\extensions\…\chrome`，
+    // 其中有一段就叫 `obox`，会被 V5 的"不能指向 obox 自己的安装目录"判成非法 ⇒ 每次读设置都会
+    // 刷一条"设置不合法"的警告（而它其实是合法的默认根）。V5 要防的是**安装目录**，不是这个。
+    let rootVerdict = normalizeRoot(profileRoot)
+    if (rootVerdict.kind === 'invalid' && defaultRootAbs && samePath(profileRoot, defaultRootAbs)) {
+      rootVerdict = { kind: 'default' }
+    }
     if (rootVerdict.kind === 'invalid') {
       console.warn(
         `[webapp] 设置 ${SETTING_KEYS.profileRoot} 不合法，已忽略：${rootVerdict.reason}`
@@ -315,10 +331,20 @@ export default function webapp(api) {
 
   /** 归一成功的自定义根缓存（归一失败时"保持上一次成功的值"，规格 §9.1） */
   let lastGoodRoot = ''
+  /**
+   * 默认根的**绝对路径**（`<扩展 data>/chrome`；1.0.4，amendment 09 §4）。
+   *
+   * 来源只能是助手：宿主不向扩展暴露 data 目录路径（`src/api/types.ts` 的 `fs` 只收相对路径），
+   * 而助手的 cwd 就是扩展 data 目录 ⇒ 用 `profileRootStatus({})` 回的 `root` 拿到它（便宜、无副作用）。
+   * 拿到之前为 `''`，`treatAsDefaultRoot()` 会原样返回（不做归一）。
+   */
+  let defaultRootAbs = ''
   /** 迁移意图：`undefined` = 尚未读；`null` = 无意图 */
   let rootIntent = undefined
   /** `list` 的"懒对账只跑一次"开关（规格 §9.4 触发点） */
   let rootIntentChecked = false
+  /** 默认根回填是否已试过（进程内一次；幂等，失败不重试以免每次调用都写设置） */
+  let defaultRootBackfilled = false
   /** 串行化迁移对账（同一时刻只跑一次） */
   let reconcileChain = null
   /**
@@ -377,6 +403,168 @@ export default function webapp(api) {
   }
 
   /**
+   * 把迁移状态写进**只读的**设置项 `webapp.migrationStatus`（1.0.4，amendment 09 §3）。
+   *
+   * 三条纪律：
+   * 1. **与改根完全无关**：写的是 `migrationStatus`，改根判定只读 `profileRoot`（`readSettings()`）；
+   * 2. **值没变就不写**：避免"每搬一个条目都触发一次设置落盘 + `onChanged` 通知"；
+   * 3. 失败只 warn（设置只是展示面，不该让迁移本身失败）。
+   *
+   * @param {object|null} intent 迁移意图；`null` ⇒ [MIGRATION_STATUS_IDLE]
+   */
+  function writeMigrationStatus(intent) {
+    writeMigrationStatusText(migrationStatusText(intent))
+  }
+
+  /**
+   * 状态项的**唯一写入点**（`writeMigrationStatus` 与"迁移中改根被拒"的提示都经它）。
+   *
+   * @param {string} text 要写进 `webapp.migrationStatus` 的文本
+   */
+  function writeMigrationStatusText(text) {
+    try {
+      if (!api.settings?.set) return
+      const current = api.settings.get ? api.settings.get(SETTING_KEYS.migrationStatus, '') : ''
+      if (String(current ?? '') === String(text ?? '')) return
+      api.settings.set(SETTING_KEYS.migrationStatus, text)
+    } catch (err) {
+      console.warn(`[webapp] 写入 ${SETTING_KEYS.migrationStatus} 失败：${messageOf(err)}`)
+    }
+  }
+
+  /**
+   * **默认根回填**（1.0.4，amendment 09 §4）：设置里为空时，把解析出的默认根绝对路径
+   * （`<扩展 data>/chrome`）写回 `webapp.profileRoot`，让设置页的目录选择框显示真实路径。
+   *
+   * 时机：**本进程第一次成功连上助手时**（不是激活瞬间）。理由与代价：
+   * - 宿主不向扩展暴露 data 目录路径（`src/api/types.ts` 的 `fs` 只收相对路径），
+   *   唯一来源是**助手的 cwd**（规格 §11.2：助手以 `cwd = <扩展目录>/data` 拉起）；
+   * - 在激活瞬间为"知道一个路径"而拉起助手子进程，违背本文件 `ensureHelper` 的既有纪律
+   *   （"激活扩展不该顺手拉起子进程"，规格 §17）⇒ 改为"通道一建立就回填"；
+   * - 结果：**用户至少打开过一次扩展卡片之后**，设置页才看得到真实路径（写进 README/amendment）。
+   *
+   * **绝不触发迁移**：只写 `profileRoot` 一个键，不写意图文件、不调用 `reconcileIntent`；
+   * 且回填值经 `treatAsDefaultRoot()` 仍按"默认根"处理 ⇒ `effectiveRoot` / 开关形态 / 卡片文案
+   * 与回填前逐字一致（这正是"规范化比较后才写、同路径不写"的用意）。
+   * 判据（含"非法值不覆盖""别的自定义根不覆盖"）全部在纯函数 `planDefaultRootBackfill` 里，有单测。
+   */
+  async function backfillDefaultRoot() {
+    if (defaultRootBackfilled) return
+    defaultRootBackfilled = true
+    try {
+      const status = await callHelper('profileRootStatus', {})
+      const root = String(status?.root ?? '').trim()
+      if (!root) {
+        console.warn('[webapp] 拿不到默认根的绝对路径，跳过默认根回填')
+        return
+      }
+      defaultRootAbs = root
+      const plan = planDefaultRootBackfill({
+        configured: readSettings().profileRoot,
+        defaultRoot: root
+      })
+      if (!plan.write) {
+        if (plan.reason !== 'already-default') {
+          console.info(
+            `[webapp] 不回填 ${SETTING_KEYS.profileRoot}（${plan.reason}）；默认根 = ${root}`
+          )
+        }
+        return
+      }
+      api.settings.set(SETTING_KEYS.profileRoot, plan.root)
+      console.info(
+        `[webapp] 已把默认根写回 ${SETTING_KEYS.profileRoot} = ${plan.root}（${plan.reason}；不触发迁移）`
+      )
+    } catch (err) {
+      console.warn(`[webapp] 默认根回填失败（不影响其它功能）：${messageOf(err)}`)
+    }
+  }
+
+  /**
+   * **设置页改根 ⇒ 自动开始迁移**（1.0.4，amendment 09 §2.6）。
+   *
+   * 用户决策：扩展页面不再有「迁移到此目录」按钮，因此"用户选了新目录"这件事由**设置变更通知**
+   * 驱动——`onChanged(key === 'profileRoot')` 时走**与原来按钮完全相同**的状态机入口
+   * （`startRootMigration`，自动覆盖确认照旧），全程静默、无任何界面交互。
+   *
+   * 判据在纯函数 `planRootChangeTrigger`（矩阵见其 JSDoc 与 `test/migrationStatus.test.js`）。
+   * **防自触发机制 = "与当前数据根比较"，不是"写入侧加标记"**，理由：
+   * 1. `api.settings.set` 的通知**投递时机不由扩展决定**（同步 / 将来可能的异步或跨窗口同步），
+   *    异步投递下"这次写入是谁发起的"根本无从判断，而"值是否指向了另一个根"与时机无关；
+   * 2. 扩展自己有 **5 处**写 `profileRoot`（迁移完成 / 放弃回写 / 无存量条目 / 默认根回填 /
+   *    迁移中改根的回写），靠"每处都记得置标志"必然漏一处，漏一处的后果是**多跑一次迁移**。
+   *
+   * 三类"不算用户改根"的写入因此天然被兜住：① 迁移完成的回写（通知到达时根已是新值 ⇒
+   * `same-as-current`，或仍有意图 ⇒ `same-as-migration-target`）；② **默认根回填**（写的就是默认根
+   * ⇒ `same-as-current`）；③ 同路径写入（大小写 / 尾斜杠差异 ⇒ `samePath`）。
+   *
+   * **迁移进行中再次改根的行为（已裁定）**：**拒绝**——把设置值**回写**成当前迁移的目标根、
+   * 写一条明确的状态文本（`改根被拒绝：已有迁移进行中…`），并记一行 warn；**不叠开第二个迁移**
+   * （既有迁移由 `reconcileIntent` 继续续做）。回写本身不会再次触发（值 == 迁移目标 ⇒ no-op）。
+   */
+  async function onProfileRootSettingChanged() {
+    const settings = readSettings()
+    const active = activeIntent()
+    const info = effectiveRootNow()
+    const plan = planRootChangeTrigger({
+      configured: settings.profileRoot,
+      // 默认根时 `info.root` 是空串（助手自己解析），用已知的默认根绝对路径代替，
+      // 这样"回填写的就是默认根"能与当前数据根**比得上**
+      dataRoot: info.isDefault ? defaultRootAbs : info.root,
+      migrationTarget: active?.to ?? '',
+      hasActiveIntent: Boolean(active)
+    })
+
+    if (!plan.changed) {
+      console.info(
+        `[webapp] 忽略 ${SETTING_KEYS.profileRoot} 的这次变更（${plan.reason}${plan.detail ? `：${plan.detail}` : ''}）`
+      )
+      return
+    }
+
+    if (!plan.trigger) {
+      // 迁移进行中又改根 ⇒ 拒绝：回写成当前迁移的目标根 + 写状态 + 记日志
+      const restore = String(active?.to ?? '')
+      if (restore) {
+        try {
+          api.settings.set(SETTING_KEYS.profileRoot, restore)
+        } catch (err) {
+          console.warn(`[webapp] 回写 ${SETTING_KEYS.profileRoot} 失败：${messageOf(err)}`)
+        }
+      }
+      console.warn(
+        `[webapp] 已有迁移进行中（目标根 ${restore || '未知'}），本次改根被拒绝并回写设置：${settings.profileRoot}`
+      )
+      writeMigrationStatusText(
+        `${migrationStatusText(active)}\n改根被拒绝：已有迁移进行中，需先完成后再改根（本次选择未生效）`
+      )
+      return
+    }
+
+    // 正常路径：与「迁移到此目录」按钮**同一个入口**
+    console.info(`[webapp] 设置页改根 ⇒ 自动开始迁移：${plan.root}`)
+    try {
+      const result = await startRootMigration({ root: plan.root })
+      if (result && result.ok === false) {
+        console.warn(`[webapp] 自动开始迁移失败：${messageOf(result.error)}`)
+        writeMigrationStatusText(`迁移未能开始：${messageOf(result.error)}`)
+        return
+      }
+      const data = result?.data ?? {}
+      if (data.started === false) {
+        console.info(`[webapp] 自动迁移无需进行：${String(data.reason ?? '无需迁移')}`)
+      } else {
+        console.info(
+          `[webapp] 已开始迁移到 ${String(data.to ?? '')}（共 ${Number(data.total ?? 0)} 项）` +
+            (data.blocked ? `；${String(data.blocked)}` : '')
+        )
+      }
+    } catch (err) {
+      console.warn(`[webapp] 自动开始迁移异常：${messageOf(err)}`)
+    }
+  }
+
+  /**
    * **生效根**（规格 §9.1 最关键的数据安全点）：
    * 迁移未完成（`phase ∈ {pending,running}`）时**恒为意图里的 `from`（旧根）**——
    * 无论宿主里的设置值是不是已经变成新根。这样"数据还在旧根、设置说新根"的中间态
@@ -392,7 +580,10 @@ export default function webapp(api) {
       fallbackRoot: lastGoodRoot,
       intent: activeIntent()
     })
-    return { settings, ...resolved }
+    // 1.0.4（amendment 09 §4）：默认根被**回填**进设置后，它的字面形态变成"绝对路径"，
+    // 但语义仍是默认根 ⇒ 这里判回 `isDefault`，使 `rootParam()`、卡片文案、开关形态
+    // **与回填前逐字一致**（否则同一份数据的行为会随"有没有回填过"漂移）。
+    return { settings, ...treatAsDefaultRoot(resolved, defaultRootAbs) }
   }
 
   /** 传给助手方法的 `root` 参数：默认根 ⇒ **不传**（助手用自己的 `<cwd>/chrome`，行为与 1.0.2 一致） */
@@ -452,12 +643,48 @@ export default function webapp(api) {
   }
 
   /**
+   * **自动确认覆盖**（1.0.4，amendment 09 §2）：把 `name` 记进意图的 `conflicts`、
+   * 并把它标成 `overwrite: true`。
+   *
+   * 为什么还要走这一步：`decideMigrationItem` 的判据是"**确认过**才允许覆盖"（P1 = B 的闸门）。
+   * 1.0.4 起不再有界面确认框（用户决策：覆盖目标、不备份、不可恢复），于是这个"确认"由扩展
+   * 自己按**用户已接受的策略**落成 `confirmedBy: 'auto-overwrite'`——**闸门的结构一行没改**，
+   * 只是确认来源从"用户点按钮"换成"用户预先接受的自动策略"。
+   *
+   * ⚠️ 覆盖 = **先删目标同名目录、再把源搬过去**，不可恢复 —— 因此每次覆盖都必须留下一条日志。
+   */
+  async function autoConfirmOverwrite(intent, name) {
+    const names = [
+      ...new Set([
+        ...(Array.isArray(intent.conflicts?.names) ? intent.conflicts.names.map(String) : []),
+        String(name)
+      ])
+    ]
+    const now = new Date().toISOString()
+    console.warn(
+      `[webapp] 迁移目标根 ${intent.to} 下已有同名目录 ${name}：按已接受的策略自动覆盖（不可恢复）`
+    )
+    return applyAndPersist(
+      {
+        ...intent,
+        conflicts: { confirmedAt: now, confirmedBy: 'auto-overwrite', names },
+        items: intent.items.map((item) =>
+          String(item?.name) === String(name) ? { ...item, overwrite: true } : item
+        )
+      },
+      { name }
+    )
+  }
+
+  /**
    * **迁移对账主循环**（规格 §9.4「状态流转」/「续做」/「互斥」的落点）。
    *
    * 关键不变量（每一条都有对应的门禁或验收）：
-   * 1. **设置值只在全部搬完后写一次**（`api.settings.set` 在整个扩展里的**唯一**调用点就在这里）；
+   * 1. **设置值只在全部搬完后写一次**（`api.settings.set(SETTING_KEYS.profileRoot, …)` 的**唯一**调用点就在这里）；
    * 2. **有失败项 ⇒ 不写设置、不删源、不删意图**，整体停在 `running`（D11）；
-   * 3. **未确认的覆盖 ⇒ 停下来把冲突清单回给界面**（续做时**重新确认**，D16）；
+   * 3. **冲突（目标根下有同名目录）自动覆盖**（1.0.4 用户决策，amendment 09 §2）：
+   *    不再等界面确认——但**逐条**把"自动覆盖（不可恢复）"写进日志，并把"已覆盖 N 项（不可恢复）"
+   *    写进状态文本（设置页只读项）；
    * 4. 终态 `done` ⇒ 写设置 → 删意图文件 → 生效根才切到新根。
    *
    * @param {{ to?: string, userDeclined?: boolean }} [options]
@@ -467,13 +694,18 @@ export default function webapp(api) {
     reconcileChain = (async () => {
       if (rootIntent === undefined) rootIntent = await readRootIntent()
       const intent = activeIntent()
-      if (!intent) return null
+      if (!intent) {
+        // 没有未完成的迁移 ⇒ 状态项回到"空闲"（值没变时 `writeMigrationStatus` 不会真写）
+        writeMigrationStatus(null)
+        return null
+      }
       if (options.to && !samePath(options.to, intent.to)) {
         // 意图里的 to 与本次请求的根不一致 ⇒ 当前迁移仍是权威（不允许半路改目标）
         console.warn(`[webapp] 迁移意图的目标是 ${intent.to}，忽略本次请求的 ${options.to}`)
       }
 
       let current = intent
+      writeMigrationStatus(current)
       // ① 重扫两个根（**不信上次的扫描结果**，规格 §7.3 ②）
       const sourceEntries = new Set(await listRootEntries(current.from))
       const targetEntries = new Set(await listRootEntries(current.to))
@@ -486,11 +718,16 @@ export default function webapp(api) {
         if (item.status === 'done' || item.status === 'overwritten' || item.status === 'missing') {
           continue
         }
+        // **冲突 ⇒ 自动确认覆盖**（1.0.4，amendment 09 §2）：把这一条写进意图的 conflicts 记录，
+        // 让它对 `pendingConflicts()` 也成立（否则收尾判定会把它当"未确认"）。
+        if (sourceExists && targetExists && !conflictsConfirmed(current.conflicts, [name])) {
+          current = await autoConfirmOverwrite(current, name)
+        }
         const confirmed = conflictsConfirmed(current.conflicts, [name])
         const decided = decideMigrationItem(
           { exists: sourceExists },
           { exists: targetExists },
-          { overwrite: item.overwrite === true, confirmed }
+          { overwrite: item.overwrite === true || (sourceExists && targetExists), confirmed }
         )
         if (decided.action === 'missing') {
           current = await applyAndPersist(current, {
@@ -498,6 +735,7 @@ export default function webapp(api) {
             status: 'missing',
             reason: decided.reason
           })
+          writeMigrationStatus(current)
           continue
         }
         if (decided.action === 'done') {
@@ -508,6 +746,7 @@ export default function webapp(api) {
           })
           sourceEntries.delete(name)
           targetEntries.add(name)
+          writeMigrationStatus(current)
           continue
         }
         if (decided.action === 'skipped') {
@@ -516,6 +755,7 @@ export default function webapp(api) {
             status: 'skipped',
             reason: decided.reason
           })
+          writeMigrationStatus(current)
           continue
         }
         // overwrite / move：真正动手（失败**不抛错**，助手回 status:'failed'）
@@ -538,23 +778,33 @@ export default function webapp(api) {
           copiedFiles: Number(result?.copiedFiles ?? 0),
           copiedBytes: Number(result?.copiedBytes ?? 0)
         })
+        if (status === 'overwritten') {
+          // 逐条可审计：覆盖是**不可恢复**的删数据动作，必须一条一条留痕（amendment 09 §2）
+          console.warn(
+            `[webapp] 迁移已自动覆盖（不可恢复）：${name}（目标根 ${current.to} 下的同名目录已被删除）`
+          )
+        }
         if (status === 'failed' || status === 'skipped') {
-          const item = current.items.find((candidate) => candidate.name === name)
-          console.warn(`[webapp] 迁移条目 ${name}：${status}（${item?.reason ?? ''}）`)
+          const done = current.items.find((candidate) => candidate.name === name)
+          console.warn(`[webapp] 迁移条目 ${name}：${status}（${done?.reason ?? ''}）`)
         }
         if (status === 'done' || status === 'overwritten') {
           sourceEntries.delete(name)
           targetEntries.add(name)
         }
+        writeMigrationStatus(current)
       }
 
-      // ③ 收尾判定（D11：failed 阻塞写设置；未确认的覆盖也阻塞）
+      // ③ 收尾判定（D11：failed 阻塞写设置；理论上不会再有"未确认的覆盖"——已自动确认）
       const unresolved = pendingConflicts(current)
       if (unresolved.length) {
+        console.warn(`[webapp] 迁移仍有未确认的覆盖项（不应发生）：${unresolved.join('、')}`)
+        writeMigrationStatus(current)
         return { intent: current, needsConfirm: true, conflicts: unresolved }
       }
       const state = advanceMigrationState(current)
       if (!state.writable) {
+        writeMigrationStatus(current)
         return { intent: current, needsConfirm: false, conflicts: [], blocked: state.reason }
       }
 
@@ -566,9 +816,11 @@ export default function webapp(api) {
       } catch (err) {
         // 写设置失败 ⇒ 不删意图文件（下次启动仍在 `running`，可继续）
         console.warn(`[webapp] 写入 ${SETTING_KEYS.profileRoot} 失败：${messageOf(err)}`)
+        writeMigrationStatus(current)
         return { intent: current, needsConfirm: false, conflicts: [], blocked: '写入设置失败' }
       }
       lastGoodRoot = current.to
+      writeMigrationStatus(current)
       await clearRootIntent()
       // 迁移完成后**清空整个体积缓存**（所有条目的 dir 都变了，规格 §9.8）：
       // 复用 `cleanCaches` 的失效条件 ③（它成功后会 `sizeCache.clear()`），
@@ -591,7 +843,11 @@ export default function webapp(api) {
     return reconcileIntent(options)
   }
 
-  /** `rootStatus` 的返回体（界面据此渲染状态行/警示行/覆盖确认框） */
+  /**
+   * `rootStatus` 的返回体（1.0.4：**界面不再渲染迁移信息**，它只用于"启动时静默续做"的一次性判定：
+   * `migration` 非空 ⇒ 续做；`invalid` ⇒ 只写日志。`statusText` 是设置页只读状态项的同一份文本，
+   * 便于静默路径把"当前到底什么状态"记进控制台。）
+   */
   async function rootStatusPayload() {
     const info = effectiveRootNow()
     const intent = activeIntent()
@@ -640,7 +896,11 @@ export default function webapp(api) {
       configuredValue: settings.profileRoot,
       invalid,
       unmanaged,
-      migration
+      migration,
+      // 设置页只读状态项的同一份文本（1.0.4，amendment 09 §3）
+      statusText: migrationStatusText(intent),
+      // 默认根的绝对路径（拿到之前是空串；用于排查"设置页为什么还没回填"）
+      defaultRoot: defaultRootAbs
     }
   }
 
@@ -659,7 +919,20 @@ export default function webapp(api) {
   const offSettings =
     typeof api.settings?.onChanged === 'function'
       ? api.settings.onChanged((key) => {
-          if (typeof key === 'string' && key.startsWith('webapp.')) settingsChanged = true
+          // ⚠️ 只有**三个真正的配置键**才作废体积缓存：`migrationStatus` 是迁移过程自己写的
+          // **展示用**状态（每搬一个条目都可能变），把它算进"设置变更"会让体积缓存无谓失效。
+          // 同时保证"写状态"与"改根"互不影响（改根判定只读 `profileRoot`，见 `readSettings`）。
+          if (key === SETTING_KEYS.profileLimitMb || key === SETTING_KEYS.diskCacheMb) {
+            settingsChanged = true
+            return
+          }
+          if (key === SETTING_KEYS.profileRoot) {
+            settingsChanged = true
+            // 1.0.4（amendment 09 §2.6）：**设置页改根 = 迁移的触发点**（用户决策）。
+            // 判据全在 `onProfileRootSettingChanged` / 纯函数 `planRootChangeTrigger` 里：
+            // 同路径、回填、非法、迁移中改根都不会触发（见那里的注释）。
+            void onProfileRootSettingChanged()
+          }
         })
       : null
 
@@ -680,8 +953,10 @@ export default function webapp(api) {
         rootIntent = await readRootIntent()
         const outcome = await reconcileNow()
         if (outcome?.needsConfirm) {
-          console.info(
-            `[webapp] 根迁移需要确认覆盖：${outcome.conflicts.join('、')}（请在界面确认）`
+          // 1.0.4 起冲突由扩展按已接受的策略**自动覆盖**（见 `autoConfirmOverwrite`）；
+          // 走到这里说明出现了预期外的情况（例如意图里的确认记录被人手工改坏）——如实报警。
+          console.warn(
+            `[webapp] 根迁移仍有未确认的覆盖项：${outcome.conflicts.join('、')}（请检查意图文件）`
           )
         } else if (outcome?.intent) {
           console.info(`[webapp] 根迁移对账：${progressText(outcome.intent.summary)}`)
@@ -925,19 +1200,22 @@ export default function webapp(api) {
     // 只记摘要（**不打印完整命令行**），且 URL 里的 userinfo 会被脱敏
     console.info(`[webapp] launch ${describeLaunch({ args })}（${logRoot(info)}）`)
     const result = await callHelper('launch', { args, ...rootParam(info) })
-    const pid = result && typeof result === 'object' ? result.pid : null
-    if (!pid) {
+    // 判据换成"helper 有没有真的派发成功"：helper 失败时**抛错**（JSON-RPC error），走不到这里；
+    // 能走到这里且 reply 是对象 ⇒ 已派发。**不再要求 pid**——经 `cmd /c start` 派发时 Chrome
+    // 不是我们的子进程，拿不到 pid（`docs/spec/amendments/09-chrome-orphan-launch.md`）；
+    // `pid` 字段保留只是为了不改既有契约（恒 null，界面也不消费它）。
+    if (!result || typeof result !== 'object') {
       let raw
       try {
         raw = JSON.stringify(result)
       } catch {
         raw = String(result)
       }
-      console.warn('[webapp] launch 未返回 pid，helper 原始回复：', raw)
+      console.warn('[webapp] launch 回复不是对象，helper 原始回复：', raw)
       return fail(`未能拉起 Chrome（helper 回复：${raw ?? '空'}）`)
     }
     if (result.warning) warnings.push(result.warning)
-    return ok({ pid, warnings })
+    return ok({ pid: result.pid ?? null, warnings })
   }
 
   /**
@@ -1071,13 +1349,16 @@ export default function webapp(api) {
   }
 
   /**
-   * `startRootMigration { root, confirmOverwrite?, dataDir? }`（规格 §9.5.3）。
+   * `startRootMigration { root, confirmOverwrite?, names?, dataDir? }`（规格 §9.5.3；1.0.4 修订见 amendment 09 §2）。
    *
-   * 三种返回：
-   * - `{ started: false, needsConfirm: true, conflicts: [名…] }`：**有冲突且未确认 ⇒ 不动手**，
-   *   把冲突清单回给界面弹覆盖确认框；
-   * - `{ started: false, reason }`：无存量条目可迁 ⇒ `reason = '无需迁移'`，且**已写设置**；
-   * - `{ started: true, to, total, needsConfirm: false }`：已开始（或在续做路径上完成）。
+   * 1.0.4 起**不再返回 `needsConfirm`**：冲突（目标根下有同名目录）由扩展按用户**已接受的策略
+   * 自动覆盖**（`confirmedBy: 'auto-overwrite'`，先删目标同名目录再搬源、不可恢复），
+   * 逐条写日志，并把"已覆盖 N 项（不可恢复）"写进设置页的状态项。
+   * `confirmOverwrite` / `names` 两个入参**保留**（老界面/脚本的调用面不变，仍按原口径校验）。
+   *
+   * 返回：
+   * - `{ started: false, reason }`：无存量条目可迁（`无需迁移`，且**已写设置**）或生效根已经是它；
+   * - `{ started: true, to, total, overwritten, … }`：已开始（或续做完成）。
    */
   async function startRootMigration(params) {
     const requested = params?.root
@@ -1087,7 +1368,7 @@ export default function webapp(api) {
     if (target.warning) console.warn(`[webapp] ${target.warning}`)
 
     // 迁移未完成时**禁止发起新的根变更**（规格 §9.4 互斥 / D14）：
-    // 唯一例外是"同一个目标根的续做"（继续 / 确认覆盖）。
+    // 唯一例外是"同一个目标根的续做"。
     rootIntent = rootIntent === undefined ? await readRootIntent() : rootIntent
     const active = activeIntent()
     if (active && !samePath(active.to, target.root)) {
@@ -1132,6 +1413,7 @@ export default function webapp(api) {
         }
         lastGoodRoot = target.root
         await clearRootIntent()
+        writeMigrationStatus(null)
         return ok({ started: false, reason: '无需迁移' })
       }
       intent = createRootIntent({
@@ -1142,7 +1424,8 @@ export default function webapp(api) {
       })
     }
 
-    // **冲突预检**（规格 §9.4「覆盖语义的确认步骤」第 1 步）：逐条探测，任何删除之前
+    // **冲突预检**（规格 §9.4「覆盖语义的确认步骤」第 1 步）：逐条探测，任何删除之前。
+    // 1.0.4：预检结论不再"回给界面等确认"，而是**直接按已接受的策略落成自动覆盖**。
     const conflicts = []
     for (const item of intent.items) {
       try {
@@ -1153,46 +1436,48 @@ export default function webapp(api) {
       }
     }
 
-    if (conflicts.length && !confirmOverwrite && !conflictsConfirmed(intent.conflicts, conflicts)) {
-      // 回给界面弹确认框；**一个字都没删**（意图文件也先不写：用户可能直接取消）
-      return ok({
-        started: false,
-        needsConfirm: true,
-        conflicts,
-        to: intent.to,
-        total: intent.items.length
-      })
-    }
-
+    // 调用方显式声明过确认（老界面/脚本路径）：仍按原口径校验"声明的清单必须覆盖当前冲突集"，
+    // 避免"多传一个 confirmOverwrite 就等于替用户确认了他没看过的冲突"。
+    const declaredNames = Array.isArray(params?.names)
+      ? [...new Set(params.names.map((name) => String(name)))]
+      : []
     if (confirmOverwrite) {
-      // 用户已看过清单并点「覆盖并继续」⇒ 把确认写进意图，并把对应条目标 overwrite。
-      //
-      // ⚠️ **数据安全（P1 = B 的闸门）**：确认的**唯一来源**是调用方传进来的 `names`
-      // （= 用户在确认框里**逐条看到**的那份清单），**不得**用"服务端当前扫到的 conflicts"顶上——
-      // 否则调用方只要多传一个 `confirmOverwrite: true`，就等于替用户确认了他没看过的冲突。
-      // 只有当调用方明确声明"我看到的清单 == 服务端此刻的冲突集"时才落确认。
-      const confirmedNames = Array.isArray(params?.names)
-        ? [...new Set(params.names.map((name) => String(name)))]
-        : []
       const covered = conflictsConfirmed(
-        { confirmedAt: 'declared', names: confirmedNames },
+        { confirmedAt: 'declared', names: declaredNames },
         conflicts
       )
       if (!covered) {
-        return fail('覆盖确认的清单与当前冲突不一致，已拒绝执行（请在界面上重新确认）')
+        return fail('覆盖确认的清单与当前冲突不一致，已拒绝执行（请重新确认）')
       }
-      const now = new Date().toISOString()
+    }
+
+    const now = new Date().toISOString()
+    if (conflicts.length) {
+      // **自动覆盖**（1.0.4 用户决策）：逐条留日志，状态文本里体现"不可恢复"
+      for (const name of conflicts) {
+        console.warn(
+          `[webapp] 迁移目标根 ${intent.to} 下已有同名目录 ${name}：按已接受的策略自动覆盖（不可恢复）`
+        )
+      }
+    }
+    const autoNames = [...new Set([...declaredNames, ...conflicts])]
+    if (autoNames.length) {
       intent = {
         ...intent,
-        conflicts: { confirmedAt: now, confirmedBy: 'user', names: confirmedNames },
+        conflicts: {
+          confirmedAt: now,
+          confirmedBy: confirmOverwrite && !conflicts.length ? 'user' : 'auto-overwrite',
+          names: autoNames
+        },
         items: intent.items.map((item) =>
-          confirmedNames.includes(item.name) ? { ...item, overwrite: true } : item
+          autoNames.includes(item.name) ? { ...item, overwrite: true } : item
         ),
         updatedAt: now
       }
     }
 
     await writeRootIntent(intent)
+    writeMigrationStatus(intent)
     const outcome = await reconcileNow()
     if (outcome?.needsConfirm) {
       return ok({
@@ -1254,6 +1539,8 @@ export default function webapp(api) {
       } catch (err) {
         console.warn(`[webapp] 放弃迁移时写回旧根失败：${messageOf(err)}`)
       }
+      // 放弃后的状态文本**先写**（意图马上就被删了，之后读不到 phase='abandoned'）
+      writeMigrationStatus({ ...intent, phase: 'abandoned' })
       await clearRootIntent()
       console.info('[webapp] 已放弃根迁移；已复制到目标根的数据**保留**，需你自行清理')
       const summary = summarize(intent)

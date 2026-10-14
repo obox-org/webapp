@@ -62,7 +62,9 @@ const REQUIRED_LIB = [
   'lib/nameSanitize.mjs',
   'lib/profileLimit.mjs',
   // v1.0.3：profile 根校验 / 标记 / 迁移判据的**唯一实现**，入口与助手都 import 它
-  'lib/profileRoot.mjs'
+  'lib/profileRoot.mjs',
+  // v1.0.4：`cmd /c start` 的参数数组与护栏（助手 lazy import 它；缺了 launch 必崩）
+  'lib/chromeLaunch.mjs'
 ]
 
 /** 递归收集（返回 zip 内路径，统一正斜杠；跳过排除目录与隐藏文件） */

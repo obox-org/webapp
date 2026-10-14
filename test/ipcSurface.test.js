@@ -56,6 +56,20 @@ function dispatchedMethods() {
   return [...new Set(methods)].sort()
 }
 
+/**
+ * **保留但当前没有界面调用点**的通道方法（1.0.4 起）。
+ *
+ * 为什么需要这个白名单：1.0.4 的用户决策是"扩展页面**不再显示任何迁移信息**"
+ * （`docs/spec/amendments/09-chrome-orphan-launch.md`），于是"浏览…"（`browseRootDir`）与
+ * "开始迁移"（`startRootMigration`）失去了唯一的界面入口。但**状态机与安全护栏必须原样保留**
+ * （意图文件 / `effectiveRoot` 恒为旧根 / 完整性判据 / 冲突覆盖策略 / 设置值最后写入），
+ * 且"状态放哪"的最终产品决定尚未关闭——因此这两个方法**留在分发表里**，只把它们从
+ * "必须有界面调用点"这条断言里豁免，并**单独断言它们确实没有调用点**（有的话必须从本表移除）。
+ *
+ * ⚠️ 这是**有意的、被记录的**豁免，不是"顺手放宽"：除这两个方法外，反向门禁逐条照旧。
+ */
+const NO_UI_CALLER = new Set(['browseRootDir', 'startRootMigration'])
+
 test('正向：src 调用的每个方法，index.js 都必须分发（否则界面会拿到"未知方法"）', () => {
   const called = calledMethods()
   const dispatched = dispatchedMethods()
@@ -64,11 +78,40 @@ test('正向：src 调用的每个方法，index.js 都必须分发（否则界�
   assert.deepEqual(missing, [], `index.js 未分发这些被界面调用的方法：${missing.join('、')}`)
 })
 
-test('反向：index.js 分发的每个方法，src 里都应有调用点（不是死代码）', () => {
+test('反向：index.js 分发的每个方法，src 里都应有调用点（只有 NO_UI_CALLER 例外）', () => {
   const called = calledMethods()
   const dispatched = dispatchedMethods()
-  const dead = dispatched.filter((method) => !called.includes(method))
+  const dead = dispatched.filter((method) => !called.includes(method) && !NO_UI_CALLER.has(method))
   assert.deepEqual(dead, [], `这些方法被实现但没有界面调用点：${dead.join('、')}`)
+  // 豁免表本身也要对账：方法一旦重新有调用点，必须从表里删掉（否则豁免会悄悄扩大）
+  const stray = [...NO_UI_CALLER].filter((method) => called.includes(method))
+  assert.deepEqual(
+    stray,
+    [],
+    `这些方法已经有界面调用点了，请从 NO_UI_CALLER 移除：${stray.join('、')}`
+  )
+})
+
+test('1.0.4：扩展页面不再调用迁移相关方法（界面不显示迁移信息），但状态机仍在入口里', () => {
+  const called = calledMethods()
+  for (const method of ['startRootMigration', 'browseRootDir']) {
+    assert.ok(!called.includes(method), `src 里不得再调用 ${method}（迁移信息不上界面）`)
+  }
+  // 静默续做仍然在（启动时推一下），因此这两个方法必须有调用点
+  for (const method of ['rootStatus', 'resolveRootMigration']) {
+    assert.ok(called.includes(method), `${method} 必须仍有调用点（静默续做的唯一通道）`)
+  }
+  const text = readFileSync(INDEX_URL, 'utf8')
+  for (const guard of [
+    'prepareRoot',
+    'conflictsConfirmed',
+    'pendingConflicts',
+    'advanceMigrationState',
+    'migrateRootDir',
+    'ROOT_INTENT_REL'
+  ]) {
+    assert.match(text, new RegExp(guard), `${guard} 是迁移安全护栏，禁止随界面一起删掉`)
+  }
 })
 
 test('方法集合与规格一致（v1.0.3 起恰好 12 个：8 个既有 + 4 个 profile 根相关，不多不少）', () => {
@@ -94,10 +137,15 @@ test('R-17/R-25：四个新方法都有真实实现（不是只挂在分发表�
   assert.match(text, /profileRootStatus/, 'rootStatus 必须调助手的 profileRootStatus')
   assert.match(text, /effectiveRoot/, 'rootStatus 必须回生效根（迁移未完成时 = 旧根）')
   assert.match(text, /SETTING_KEYS\.profileRoot|'webapp\.profileRoot'/, '必须读第三个设置键')
-  // `startRootMigration`：建根写标记 + 冲突预检 + 不确认不动手
+  // `startRootMigration`：建根写标记 + 冲突预检 + **自动覆盖**（1.0.4 用户决策，amendment 09 §2）
   assert.match(text, /prepareRoot/, '迁移前必须 prepareRoot（目标根必须有标记）')
-  assert.match(text, /needsConfirm/, '有冲突且未确认必须回 needsConfirm（不开始、不动手）')
-  assert.match(text, /confirmOverwrite/, '必须支持"用户已确认覆盖"的入参')
+  assert.match(
+    text,
+    /auto-overwrite/,
+    '冲突必须按已接受的策略自动确认覆盖（confirmedBy: auto-overwrite），不再等界面确认'
+  )
+  assert.match(text, /自动覆盖（不可恢复）/, '逐条覆盖必须留日志（不可恢复）')
+  assert.match(text, /confirmOverwrite/, '必须支持"调用方已声明确认覆盖"的入参（调用面不变）')
   // `resolveRootMigration`：三个动作
   for (const action of ["'continue'", "'abandon'", "'confirm-overwrite'"]) {
     assert.ok(text.includes(action), `resolveRootMigration 必须支持 ${action}`)
@@ -108,18 +156,40 @@ test('R-17/R-25：四个新方法都有真实实现（不是只挂在分发表�
   assert.match(text, /supported/, '必须回 supported 供界面决定降级形态')
 })
 
-test('数据安全：设置值只在迁移全部完成后写一次（唯一写点）', () => {
+test('数据安全：改根设置（profileRoot）只在明确的三处 + 默认根回填处写入', () => {
+  // ⚠️ 必须**去掉注释**再数：`reconcileIntent` 的 JSDoc 里就写着这个调用点（举例），
+  // 按原文计数会把它也数进去。
   const text = readFileSync(INDEX_URL, 'utf8')
-  const writes = [...text.matchAll(/api\.settings\.set\(/g)]
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '')
+  // 1.0.4 起 `api.settings.set` 还写**只读状态项** `migrationStatus`，因此判据必须**按 key** 数：
+  // 写 `profileRoot` = 迁移完成 / 放弃回写 / 无存量条目 / 默认根回填（4 处）；
+  // 写 `migrationStatus` = 只有 `writeMigrationStatus` 一处（展示用，绝不参与改根判定）。
+  const rootWrites = [...text.matchAll(/api\.settings\.set\(\s*SETTING_KEYS\.profileRoot/g)]
   assert.equal(
-    writes.length,
-    3,
-    `api.settings.set 的出现次数必须恰为 3（迁移完成 / 放弃回写 / 无存量条目），实际 ${writes.length}`
+    rootWrites.length,
+    5,
+    `写 profileRoot 必须恰好 5 处（完成 / 放弃回写 / 无存量条目 / 默认根回填 / 迁移中改根的回写），实际 ${rootWrites.length}`
   )
-  // 三处都必须在"迁移编排"这一大段里，且迁移完成那次必须在 isMigrationComplete/advanceMigrationState 判定之后
+  const statusWrites = [...text.matchAll(/api\.settings\.set\(\s*SETTING_KEYS\.migrationStatus/g)]
+  assert.equal(statusWrites.length, 1, '状态文本必须只有一个写入点（writeMigrationStatus）')
+  // 迁移完成那次必须在 advanceMigrationState 判定之后
   const completeAt = text.indexOf('advanceMigrationState(current)')
-  const setAfter = text.indexOf('api.settings.set', completeAt)
+  const setAfter = text.indexOf(
+    'api.settings.set(SETTING_KEYS.profileRoot, current.to)',
+    completeAt
+  )
   assert.ok(completeAt > 0 && setAfter > completeAt, '写设置必须发生在"全部完成"判定之后')
+  // 改根判定**只读 profileRoot**：`readSettings` 里不得出现 migrationStatus
+  const readSettingsFn = text.slice(
+    text.indexOf('function readSettings('),
+    text.indexOf('async function', text.indexOf('function readSettings('))
+  )
+  assert.ok(readSettingsFn.includes('normalizeRoot'), '必须能定位到 readSettings 的实现')
+  assert.ok(
+    !readSettingsFn.includes('migrationStatus'),
+    'readSettings 不得读 migrationStatus（写状态绝不能影响改根判定）'
+  )
 })
 
 test('数据安全：意图文件写在扩展 data 目录（api.fs），**不得**写进根里', () => {

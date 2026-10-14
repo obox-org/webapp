@@ -7,3 +7,8 @@ data/
 # 证据快照（docs/evidence/**）按字节原样保存：是当时产物 / DOM 转储的副本，
 # 用于复核"那一刻到底长什么样"，格式化它就等于毁掉证据 —— 不参与 prettier。
 docs/evidence/
+
+# 归档历史记录（webapp-profile-root 的阶段 1/2 产物）按原文保留：prettier 会改写表格分隔行与内联代码反引号，
+# 等于破坏归档保真 —— 不参与 prettier。
+docs/spec/webapp-profile-root-requirements.md
+docs/spec/webapp-profile-root-spec.md
