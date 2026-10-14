@@ -16,6 +16,7 @@ import {
   DEFAULT_ROOT_DIRNAME,
   EXT_ID,
   MARKER_ID,
+  MARKER_VERSION,
   MIGRATION_PHASES,
   MIN_COPY_RATIO,
   ROOT_INTENT,
@@ -85,27 +86,55 @@ test('P-3：盘符根（C:\\、D:/、C:）一律拒绝，文案指明"磁盘根�
   assert.equal(isDriveRoot('C:\\Users\\me\\profiles'), false)
 })
 
-test('P-4：obox 程序目录（自身或位于其下）被拒，文案含"obox"', () => {
+test('P-4（1.0.6 收紧）：只拒真正的 obox **安装目录**；"路径段里叫 obox"降级为提示', () => {
   const execPath = 'C:\\Users\\me\\AppData\\Local\\Programs\\obox\\obox.exe'
   const installDir = 'C:\\Users\\me\\AppData\\Local\\Programs\\obox'
+  // ① **仍然拒**：落在安装目录里（含安装目录自身）——这是 V5 的**本意**，一个都不能漏
   for (const value of [installDir, `${installDir}\\profiles`, `${installDir}\\data\\chrome`]) {
     const verdict = normalizeRoot(value, { execPath, platform: 'win32' })
     assert.equal(verdict.kind, 'invalid', `${value} 应被拒`)
     assert.match(verdict.reason, /obox/)
   }
-  // 路径段里**真的**有名为 obox 的目录 ⇒ 也拒（不靠 execPath 也能判）
-  assert.match(
-    String(normalizeRoot('D:\\obox\\profiles', { execPath, platform: 'win32' }).reason),
-    /obox/
-  )
-  // 与 obox 安装目录无关的路径正常通过
-  assert.equal(
-    normalizeRoot('D:\\obox-webapp\\profiles', { execPath, platform: 'win32' }).kind,
-    'absolute',
-    '`obox-webapp` 不是 `obox` 目录，不得误伤'
-  )
+  // 大小写 / 分隔符差异也照样拒（规范化之后比较）
+  for (const value of [
+    'c:/users/me/appdata/local/programs/obox',
+    'C:\\Users\\me\\AppData\\Local\\Programs\\obox\\'
+  ]) {
+    assert.equal(
+      normalizeRoot(value, { execPath, platform: 'win32' }).kind,
+      'invalid',
+      `${value} 应与安装目录同判`
+    )
+  }
+  // ② **不再拒**（1.0.6 的行为变更）：只是"某一段目录名叫 obox"，与安装目录无关。
+  // ⚠️ 旧实现（1.0.3–1.0.5）在这里一律拒绝，且**只留一行控制台日志** ⇒ 用户在设置页看到自己的值、
+  // 实际却一直用默认根。这就是本次"配置没生效"最可能的来源之一。
+  const oboxDir = normalizeRoot('D:\\obox\\profiles', { execPath, platform: 'win32' })
+  assert.equal(oboxDir.kind, 'absolute', '`D:\\obox\\profiles` 必须被接受（与安装目录无关）')
+  assert.equal(oboxDir.root, 'D:\\obox\\profiles')
+  // 但必须给出**非阻塞提示**，让用户能自查（提示与拒绝走不同通道）
+  assert.match(String(oboxDir.warning), /obox/, '路径段里有 obox 目录 ⇒ 给一条提示（不是拒绝）')
+  // 默认根本身就含一段 `obox`（%APPDATA%\obox\extensions\…）⇒ 它也必须被接受 + 有提示
+  const realDefault =
+    'C:\\Users\\me\\AppData\\Roaming\\obox\\extensions\\webapp_chenzhi\\data\\chrome'
+  const defaultVerdict = normalizeRoot(realDefault, { execPath, platform: 'win32' })
+  assert.equal(defaultVerdict.kind, 'absolute', '真实默认根必须能通过 V5（1.0.5 前会被误拒）')
+  assert.equal(defaultVerdict.root, realDefault)
+  assert.match(String(defaultVerdict.warning), /obox/)
+  // `obox-webapp` 是一个词，不是名为 obox 的目录 ⇒ 连提示都不该有
+  const other = normalizeRoot('D:\\obox-webapp\\profiles', { execPath, platform: 'win32' })
+  assert.equal(other.kind, 'absolute', '`obox-webapp` 不是 `obox` 目录，不得误伤')
+  assert.equal(other.warning, null, '`obox-webapp` 不是名为 obox 的目录 ⇒ 不该有提示')
+  // ③ **渲染进程拿不到 execPath ⇒ 跳过 V5 而不是瞎拒**（`runtimeExecPath()` 回落空串）
+  for (const value of [installDir, `${installDir}\\profiles`]) {
+    assert.equal(
+      normalizeRoot(value, { execPath: '', platform: 'win32' }).kind,
+      'absolute',
+      '没有 execPath 时应跳过安装目录检查（真正的判定由助手侧完成）'
+    )
+  }
   // ⚠️ **不做**"根是安装目录的祖先就拒"：`C:\\Users`、`C:\\Program Files` 这类系统目录
-  // 会被一刀切拒掉（过宽）；改为按"路径段里是否有 obox"判（上面那条）
+  // 会被一刀切拒掉（过宽）；祖先情形由 V6（扩展 data 目录）与"落点在安装目录里"两条兜住
   assert.equal(normalizeRoot('C:\\Users', { execPath, platform: 'win32' }).kind, 'absolute')
 })
 
@@ -189,6 +218,30 @@ test('P-8：标记字段集合恰好五字段；readMarker 对非法输入容错
   assert.equal(isManagedTargetRoot(JSON.stringify(marker)), true)
   assert.equal(isManagedTargetRoot(null), false)
   assert.equal(isManagedTargetRoot('{}'), false)
+})
+
+test('P-8b（1.0.6）：标记的 `version` 是**格式版本**、不是扩展版本号；老标记照样算受管', () => {
+  // 现场核对时踩到的坑：扩展已升到 1.0.6，用户机器上的标记文件里却写着 `"version": "1.0.3"`
+  // （1.0.3–1.0.5 的 `createMarker` 把扩展版本号写死进默认值）⇒ 看起来像"版本没升上去"，误导排查。
+  assert.equal(MARKER_VERSION, '1', '标记格式版本 = 1（与扩展版本号解耦）')
+  assert.equal(createMarker({ root: 'D:\\x' }).version, MARKER_VERSION)
+  assert.equal(createMarker({ root: 'D:\\x', version: '9.9' }).version, '9.9', '显式传入仍尊重')
+  // 读侧**只认 marker 魔数**，不比对 version：老标记（version: '1.0.3'）继续算受管根
+  const legacy = JSON.stringify({
+    marker: MARKER_ID,
+    extId: EXT_ID,
+    version: '1.0.3',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    root: 'D:\\obox-webapp\\profiles'
+  })
+  assert.equal(isManagedTargetRoot(legacy), true, '版本字段变了不影响"有标记 = 受管"')
+  assert.equal(readMarker(legacy)?.version, '1.0.3', '读回时原样带出（纯展示）')
+  // 迁移意图同样不再回落写死的扩展版本号：入口传 EXT_VERSION，直接构造时留空
+  assert.equal(createRootIntent({ from: 'C:\\a', to: 'D:\\b', items: [] }).version, '')
+  assert.equal(
+    createRootIntent({ from: 'C:\\a', to: 'D:\\b', items: [], version: '1.0.6' }).version,
+    '1.0.6'
+  )
 })
 
 // ---------------------------------------------------------------------------

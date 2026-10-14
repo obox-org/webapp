@@ -24,15 +24,15 @@ const settings = manifest.contributes?.settings
 const fields = settings?.fields ?? []
 const byKey = Object.fromEntries(fields.map((field) => [field.key, field]))
 
-test('manifest.contributes.settings 存在且形状正确（v1.0.4 起恰好四个设置项）', () => {
+test('manifest.contributes.settings 存在且形状正确（1.0.6 起恰好五个设置项）', () => {
   assert.ok(settings, 'contributes.settings 必须存在（R17 的设置页）')
   assert.equal(settings.id, 'webapp.settings')
   assert.ok(String(settings.title ?? '').trim(), 'settings.title 必须非空')
   assert.ok(Array.isArray(fields), 'settings.fields 必须是数组')
   assert.equal(
     fields.length,
-    4,
-    '恰好四个设置项（两个 select + 一个 directory + 一个 status，不多不少）'
+    5,
+    '恰好五个设置项（两个 select + directory + status + 1.0.6 的 modal status，不多不少）'
   )
   for (const field of fields) {
     assert.ok(String(field.key ?? '').trim(), '每个字段必须有 key')
@@ -47,9 +47,10 @@ test('manifest.contributes.settings 存在且形状正确（v1.0.4 起恰好四�
   }
 })
 
-test('四个键名固定：profileLimitMb / diskCacheMb / profileRoot / migrationStatus（且含扩展前缀）', () => {
+test('五个键名固定：profileLimitMb / diskCacheMb / profileRoot / migrationStatus / migrationProgress', () => {
   assert.deepEqual(fields.map((field) => field.key).sort(), [
     SETTING_KEYS.diskCacheMb,
+    SETTING_KEYS.migrationProgress,
     SETTING_KEYS.migrationStatus,
     SETTING_KEYS.profileLimitMb,
     SETTING_KEYS.profileRoot
@@ -57,11 +58,30 @@ test('四个键名固定：profileLimitMb / diskCacheMb / profileRoot / migratio
   for (const field of fields) {
     assert.ok(field.key.startsWith('webapp.'), `${field.key} 必须带 webapp. 前缀`)
   }
-  // ⚠️ 两个键必须独立：写状态绝不能参与"改根"判定
+  // ⚠️ 三个"状态类"键必须彼此独立：写状态/进度绝不能参与"改根"判定
   assert.notEqual(SETTING_KEYS.profileRoot, SETTING_KEYS.migrationStatus)
+  assert.notEqual(SETTING_KEYS.profileRoot, SETTING_KEYS.migrationProgress)
+  assert.notEqual(SETTING_KEYS.migrationStatus, SETTING_KEYS.migrationProgress)
 })
 
-test('两个下拉仍是 select、根目录是 directory、状态项是 status（只读）', () => {
+test('1.0.6：迁移进度项必须是 `status` + `modal: true` + **默认空串**（模态框显隐只看它）', () => {
+  const field = byKey[SETTING_KEYS.migrationProgress]
+  assert.ok(field, '必须有 webapp.migrationProgress 字段')
+  assert.equal(field.type, 'status', '必须是 status（只读展示；宿主据 modal 决定弹遮罩）')
+  assert.equal(field.modal, true, '必须带 modal: true —— 宿主据此渲染不可关闭的等待模态框')
+  assert.equal(field.default, '', '默认值必须是**空串**（非空即弹模态框，空闲时绝不能弹）')
+  assert.equal(field.options, undefined, 'status 字段不得带 options')
+  assert.ok(String(field.label ?? '').trim(), '必须有 label（模态框标题）')
+  // description 必须说清"结束（成功或失败）后自动消失"——不得承诺"只有成功才消失"
+  assert.match(field.description, /只读/)
+  assert.match(field.description, /迁移/)
+  assert.match(field.description, /成功或失败/)
+  assert.match(field.description, /消失/)
+  assert.ok(!/只有.*成功/.test(field.description), '不得承诺"只有成功才消失"（失败也是终态）')
+  assert.ok(!/[*_`#]/.test(field.description), 'description 里不得出现 Markdown 标记')
+})
+
+test('两个下拉仍是 select、根目录是 directory、两个状态项都是 status（只读）', () => {
   for (const field of fields) {
     if (field.key === SETTING_KEYS.profileRoot) {
       assert.equal(field.type, 'directory', 'profileRoot 必须是 directory（1.0.4 起）')
@@ -69,6 +89,16 @@ test('两个下拉仍是 select、根目录是 directory、状态项是 status�
     }
     if (field.key === SETTING_KEYS.migrationStatus) {
       assert.equal(field.type, 'status', 'migrationStatus 必须是 status（只读展示，无按钮）')
+      assert.equal(field.options, undefined, 'status 字段不得带 options')
+      assert.equal(
+        field.modal,
+        undefined,
+        'migrationStatus 不得是模态框（那是 migrationProgress 的职责）'
+      )
+      continue
+    }
+    if (field.key === SETTING_KEYS.migrationProgress) {
+      assert.equal(field.type, 'status', 'migrationProgress 必须是 status（只读展示）')
       assert.equal(field.options, undefined, 'status 字段不得带 options')
       continue
     }
@@ -226,12 +256,13 @@ test('版本号在五处必须完全一致（manifest / package / lock 顶层 / 
       .join('、')}`
   )
   assert.match(String(unique[0]), /^\d+\.\d+\.\d+$/, '版本必须是合法 semver')
-  // v1.0.5 是本需求的发布版本（amendment 09：Chrome 孤儿化启动 + 扩展页去掉迁移展示 +
-  // 根目录设置项改为 directory + 改根即触发迁移）；**1.0.5 相对 1.0.4 是修复版**：
-  // `lib/profileRoot.mjs` 里 8 处 `process.platform`/`process.execPath` 兜底在渲染进程抛
-  // `process is not defined`，已改为模块内的 `runtimePlatform()` / `runtimeExecPath()`（门禁 P-14c）。
+  // v1.0.6 是本需求的修复版（1.0.6 = "设置里的配置没生效"的根因修复）：
+  // ① 迁移的**源**不再取设置值（取实际数据根）⇒ 1.0.3–1.0.5 的"改根自动迁移"事实上从未生效；
+  // ② 激活期**主动**连助手 → 回填默认根（设置页一打开就能看到真实路径）+ 改根对账（补做错过的迁移）；
+  // ③ `webapp.migrationStatus` 在无迁移时也写出"当前生效根 / 设置值"，被拒绝的设置值**显式写进状态项**；
+  // ④ V5 收紧到"只拒真正的 obox 安装目录"（旧实现的"路径段含 obox ⇒ 一律拒"是静默误伤）。
   // 五处一致之外再钉一次具体值，避免"五处一起漂而没有任何一处改过"这种静默失误
-  assert.equal(unique[0], '1.0.5', `本次发布的版本必须是 1.0.5，实际 ${unique[0]}`)
+  assert.equal(unique[0], '1.0.6', `本次发布的版本必须是 1.0.6，实际 ${unique[0]}`)
 })
 
 test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {
