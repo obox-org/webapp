@@ -226,10 +226,12 @@ test('版本号在五处必须完全一致（manifest / package / lock 顶层 / 
       .join('、')}`
   )
   assert.match(String(unique[0]), /^\d+\.\d+\.\d+$/, '版本必须是合法 semver')
-  // v1.0.4 是本需求的发布版本（amendment 09：Chrome 孤儿化启动 + 扩展页去掉迁移展示 +
-  // 根目录设置项改为 directory）；五处一致之外再钉一次具体值，
-  // 避免"五处一起漂到 1.0.5 而没有任何一处改过"这种静默失误
-  assert.equal(unique[0], '1.0.4', `本次发布的版本必须是 1.0.4，实际 ${unique[0]}`)
+  // v1.0.5 是本需求的发布版本（amendment 09：Chrome 孤儿化启动 + 扩展页去掉迁移展示 +
+  // 根目录设置项改为 directory + 改根即触发迁移）；**1.0.5 相对 1.0.4 是修复版**：
+  // `lib/profileRoot.mjs` 里 8 处 `process.platform`/`process.execPath` 兜底在渲染进程抛
+  // `process is not defined`，已改为模块内的 `runtimePlatform()` / `runtimeExecPath()`（门禁 P-14c）。
+  // 五处一致之外再钉一次具体值，避免"五处一起漂而没有任何一处改过"这种静默失误
+  assert.equal(unique[0], '1.0.5', `本次发布的版本必须是 1.0.5，实际 ${unique[0]}`)
 })
 
 test('manifest 与 package.json 的版本必须一致（避免产物名与包元数据漂移）', () => {

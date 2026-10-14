@@ -78,7 +78,7 @@ const ROOT_UNMARKED = '[profile-root-unmarked]'
 /** 迁移意图文件的相对路径（**写在扩展 data 目录**，不随根移动；规格 D4 / U-5） */
 const ROOT_INTENT_REL = ROOT_INTENT
 /** 扩展版本（五处一致：manifest / package / package-lock ×2 / 卡片注册） */
-const EXT_VERSION = '1.0.4'
+const EXT_VERSION = '1.0.5'
 /**
  * 「浏览…」的**降级文案**（规格 §7.4 的表；老宿主/能力探测失败时回给界面）。
  * 必须诚实：不承诺"一定能选目录"，并明确告诉用户下一步怎么做。
@@ -252,7 +252,7 @@ export default function webapp(api) {
       connecting = Promise.resolve(api.ipc.connect(CHANNEL_ID))
         .then(() => {
           connected = true
-          // 1.0.4：通道一建立就把默认根的绝对路径回填进设置（幂等、**绝不触发迁移**，见该函数注释）。
+          // 1.0.5：通道一建立就把默认根的绝对路径回填进设置（幂等、**绝不触发迁移**，见该函数注释）。
           // 放在这里而不是激活瞬间：宿主不暴露 data 目录路径，唯一的来源是助手（激活即连助手
           // 会违背本文件"懒连接"的既有纪律，规格 §17）。因此实际时机 = **本进程第一次用助手**。
           void backfillDefaultRoot()
@@ -311,7 +311,7 @@ export default function webapp(api) {
     }
     // ⚠️ `api.settings.get` 返回的可能是任意类型（设置项类型是 directory，但存储层不保证）⇒ String()
     const profileRoot = rootRaw === undefined || rootRaw === null ? '' : String(rootRaw)
-    // 1.0.4（amendment 09 §4）：设置里被**回填**成默认根的绝对路径时，先按"它就是默认根"判一次。
+    // 1.0.5（amendment 09 §4）：设置里被**回填**成默认根的绝对路径时，先按"它就是默认根"判一次。
     // 为什么必须放在 `normalizeRoot` 之前：真实默认根是 `%APPDATA%\obox\extensions\…\chrome`，
     // 其中有一段就叫 `obox`，会被 V5 的"不能指向 obox 自己的安装目录"判成非法 ⇒ 每次读设置都会
     // 刷一条"设置不合法"的警告（而它其实是合法的默认根）。V5 要防的是**安装目录**，不是这个。
@@ -332,7 +332,7 @@ export default function webapp(api) {
   /** 归一成功的自定义根缓存（归一失败时"保持上一次成功的值"，规格 §9.1） */
   let lastGoodRoot = ''
   /**
-   * 默认根的**绝对路径**（`<扩展 data>/chrome`；1.0.4，amendment 09 §4）。
+   * 默认根的**绝对路径**（`<扩展 data>/chrome`；1.0.5，amendment 09 §4）。
    *
    * 来源只能是助手：宿主不向扩展暴露 data 目录路径（`src/api/types.ts` 的 `fs` 只收相对路径），
    * 而助手的 cwd 就是扩展 data 目录 ⇒ 用 `profileRootStatus({})` 回的 `root` 拿到它（便宜、无副作用）。
@@ -403,7 +403,7 @@ export default function webapp(api) {
   }
 
   /**
-   * 把迁移状态写进**只读的**设置项 `webapp.migrationStatus`（1.0.4，amendment 09 §3）。
+   * 把迁移状态写进**只读的**设置项 `webapp.migrationStatus`（1.0.5，amendment 09 §3）。
    *
    * 三条纪律：
    * 1. **与改根完全无关**：写的是 `migrationStatus`，改根判定只读 `profileRoot`（`readSettings()`）；
@@ -433,7 +433,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **默认根回填**（1.0.4，amendment 09 §4）：设置里为空时，把解析出的默认根绝对路径
+   * **默认根回填**（1.0.5，amendment 09 §4）：设置里为空时，把解析出的默认根绝对路径
    * （`<扩展 data>/chrome`）写回 `webapp.profileRoot`，让设置页的目录选择框显示真实路径。
    *
    * 时机：**本进程第一次成功连上助手时**（不是激活瞬间）。理由与代价：
@@ -481,7 +481,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **设置页改根 ⇒ 自动开始迁移**（1.0.4，amendment 09 §2.6）。
+   * **设置页改根 ⇒ 自动开始迁移**（1.0.5，amendment 09 §2.6）。
    *
    * 用户决策：扩展页面不再有「迁移到此目录」按钮，因此"用户选了新目录"这件事由**设置变更通知**
    * 驱动——`onChanged(key === 'profileRoot')` 时走**与原来按钮完全相同**的状态机入口
@@ -580,7 +580,7 @@ export default function webapp(api) {
       fallbackRoot: lastGoodRoot,
       intent: activeIntent()
     })
-    // 1.0.4（amendment 09 §4）：默认根被**回填**进设置后，它的字面形态变成"绝对路径"，
+    // 1.0.5（amendment 09 §4）：默认根被**回填**进设置后，它的字面形态变成"绝对路径"，
     // 但语义仍是默认根 ⇒ 这里判回 `isDefault`，使 `rootParam()`、卡片文案、开关形态
     // **与回填前逐字一致**（否则同一份数据的行为会随"有没有回填过"漂移）。
     return { settings, ...treatAsDefaultRoot(resolved, defaultRootAbs) }
@@ -643,11 +643,11 @@ export default function webapp(api) {
   }
 
   /**
-   * **自动确认覆盖**（1.0.4，amendment 09 §2）：把 `name` 记进意图的 `conflicts`、
+   * **自动确认覆盖**（1.0.5，amendment 09 §2）：把 `name` 记进意图的 `conflicts`、
    * 并把它标成 `overwrite: true`。
    *
    * 为什么还要走这一步：`decideMigrationItem` 的判据是"**确认过**才允许覆盖"（P1 = B 的闸门）。
-   * 1.0.4 起不再有界面确认框（用户决策：覆盖目标、不备份、不可恢复），于是这个"确认"由扩展
+   * 1.0.5 起不再有界面确认框（用户决策：覆盖目标、不备份、不可恢复），于是这个"确认"由扩展
    * 自己按**用户已接受的策略**落成 `confirmedBy: 'auto-overwrite'`——**闸门的结构一行没改**，
    * 只是确认来源从"用户点按钮"换成"用户预先接受的自动策略"。
    *
@@ -682,7 +682,7 @@ export default function webapp(api) {
    * 关键不变量（每一条都有对应的门禁或验收）：
    * 1. **设置值只在全部搬完后写一次**（`api.settings.set(SETTING_KEYS.profileRoot, …)` 的**唯一**调用点就在这里）；
    * 2. **有失败项 ⇒ 不写设置、不删源、不删意图**，整体停在 `running`（D11）；
-   * 3. **冲突（目标根下有同名目录）自动覆盖**（1.0.4 用户决策，amendment 09 §2）：
+   * 3. **冲突（目标根下有同名目录）自动覆盖**（1.0.5 用户决策，amendment 09 §2）：
    *    不再等界面确认——但**逐条**把"自动覆盖（不可恢复）"写进日志，并把"已覆盖 N 项（不可恢复）"
    *    写进状态文本（设置页只读项）；
    * 4. 终态 `done` ⇒ 写设置 → 删意图文件 → 生效根才切到新根。
@@ -718,7 +718,7 @@ export default function webapp(api) {
         if (item.status === 'done' || item.status === 'overwritten' || item.status === 'missing') {
           continue
         }
-        // **冲突 ⇒ 自动确认覆盖**（1.0.4，amendment 09 §2）：把这一条写进意图的 conflicts 记录，
+        // **冲突 ⇒ 自动确认覆盖**（1.0.5，amendment 09 §2）：把这一条写进意图的 conflicts 记录，
         // 让它对 `pendingConflicts()` 也成立（否则收尾判定会把它当"未确认"）。
         if (sourceExists && targetExists && !conflictsConfirmed(current.conflicts, [name])) {
           current = await autoConfirmOverwrite(current, name)
@@ -844,7 +844,7 @@ export default function webapp(api) {
   }
 
   /**
-   * `rootStatus` 的返回体（1.0.4：**界面不再渲染迁移信息**，它只用于"启动时静默续做"的一次性判定：
+   * `rootStatus` 的返回体（1.0.5：**界面不再渲染迁移信息**，它只用于"启动时静默续做"的一次性判定：
    * `migration` 非空 ⇒ 续做；`invalid` ⇒ 只写日志。`statusText` 是设置页只读状态项的同一份文本，
    * 便于静默路径把"当前到底什么状态"记进控制台。）
    */
@@ -897,7 +897,7 @@ export default function webapp(api) {
       invalid,
       unmanaged,
       migration,
-      // 设置页只读状态项的同一份文本（1.0.4，amendment 09 §3）
+      // 设置页只读状态项的同一份文本（1.0.5，amendment 09 §3）
       statusText: migrationStatusText(intent),
       // 默认根的绝对路径（拿到之前是空串；用于排查"设置页为什么还没回填"）
       defaultRoot: defaultRootAbs
@@ -928,7 +928,7 @@ export default function webapp(api) {
           }
           if (key === SETTING_KEYS.profileRoot) {
             settingsChanged = true
-            // 1.0.4（amendment 09 §2.6）：**设置页改根 = 迁移的触发点**（用户决策）。
+            // 1.0.5（amendment 09 §2.6）：**设置页改根 = 迁移的触发点**（用户决策）。
             // 判据全在 `onProfileRootSettingChanged` / 纯函数 `planRootChangeTrigger` 里：
             // 同路径、回填、非法、迁移中改根都不会触发（见那里的注释）。
             void onProfileRootSettingChanged()
@@ -953,7 +953,7 @@ export default function webapp(api) {
         rootIntent = await readRootIntent()
         const outcome = await reconcileNow()
         if (outcome?.needsConfirm) {
-          // 1.0.4 起冲突由扩展按已接受的策略**自动覆盖**（见 `autoConfirmOverwrite`）；
+          // 1.0.5 起冲突由扩展按已接受的策略**自动覆盖**（见 `autoConfirmOverwrite`）；
           // 走到这里说明出现了预期外的情况（例如意图里的确认记录被人手工改坏）——如实报警。
           console.warn(
             `[webapp] 根迁移仍有未确认的覆盖项：${outcome.conflicts.join('、')}（请检查意图文件）`
@@ -1349,9 +1349,9 @@ export default function webapp(api) {
   }
 
   /**
-   * `startRootMigration { root, confirmOverwrite?, names?, dataDir? }`（规格 §9.5.3；1.0.4 修订见 amendment 09 §2）。
+   * `startRootMigration { root, confirmOverwrite?, names?, dataDir? }`（规格 §9.5.3；1.0.5 修订见 amendment 09 §2）。
    *
-   * 1.0.4 起**不再返回 `needsConfirm`**：冲突（目标根下有同名目录）由扩展按用户**已接受的策略
+   * 1.0.5 起**不再返回 `needsConfirm`**：冲突（目标根下有同名目录）由扩展按用户**已接受的策略
    * 自动覆盖**（`confirmedBy: 'auto-overwrite'`，先删目标同名目录再搬源、不可恢复），
    * 逐条写日志，并把"已覆盖 N 项（不可恢复）"写进设置页的状态项。
    * `confirmOverwrite` / `names` 两个入参**保留**（老界面/脚本的调用面不变，仍按原口径校验）。
@@ -1425,7 +1425,7 @@ export default function webapp(api) {
     }
 
     // **冲突预检**（规格 §9.4「覆盖语义的确认步骤」第 1 步）：逐条探测，任何删除之前。
-    // 1.0.4：预检结论不再"回给界面等确认"，而是**直接按已接受的策略落成自动覆盖**。
+    // 1.0.5：预检结论不再"回给界面等确认"，而是**直接按已接受的策略落成自动覆盖**。
     const conflicts = []
     for (const item of intent.items) {
       try {
@@ -1453,7 +1453,7 @@ export default function webapp(api) {
 
     const now = new Date().toISOString()
     if (conflicts.length) {
-      // **自动覆盖**（1.0.4 用户决策）：逐条留日志，状态文本里体现"不可恢复"
+      // **自动覆盖**（1.0.5 用户决策）：逐条留日志，状态文本里体现"不可恢复"
       for (const name of conflicts) {
         console.warn(
           `[webapp] 迁移目标根 ${intent.to} 下已有同名目录 ${name}：按已接受的策略自动覆盖（不可恢复）`

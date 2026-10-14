@@ -570,6 +570,30 @@ test('P-14b：profileRoot.mjs **不得** import 任何 node: 内建（它同时�
   assert.ok(!/require\(['"]node:/.test(text), '不得出现 `require("node:…")`')
 })
 
+test('P-14c：lib/*.mjs 的**代码**里不得引用 `process`（渲染进程没有这个全局）', () => {
+  // 为什么是硬门禁：`lib/**` 同时被 Node 侧（`helper.cjs`）与渲染进程（`index.js`）加载，而渲染进程没有
+  // `process`。默认参数（`platform = process.platform`）与 `?? process.platform` **只在没传值时才求值**，
+  // 所以任何漏传的调用路径都会在渲染进程抛 `process is not defined`——这正是 v1.0.4 的线上报错
+  // （`normalizeRoot('')` 每次激活都会走到）。修法是统一用模块内的 `runtimePlatform()` / `runtimeExecPath()`。
+  // 注释里提到 `process` 是允许的（本模块顶部就在解释这个坑），所以只看**代码行**。
+  const libDir = new URL('../lib/', import.meta.url)
+  const offenders = []
+  for (const name of readdirSync(libDir)) {
+    if (!name.endsWith('.mjs')) continue
+    const lines = readFileSync(new URL(name, libDir), 'utf8').split(/\r?\n/)
+    lines.forEach((line, idx) => {
+      if (/^\s*(\*|\/\/)/.test(line)) return // 整行注释
+      const code = line.replace(/\/\/.*$/, '') // 行尾注释
+      if (/\bprocess\s*\./.test(code)) offenders.push(`${name}:${idx + 1}`)
+    })
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `lib/*.mjs 的代码里不得引用 process（改用 runtimePlatform()/runtimeExecPath()）：${offenders.join('、')}`
+  )
+})
+
 test('P-16：不得存在任何"覆盖前先留一份"的备份路径（P1 = B 不做备份）', () => {
   const libDir = new URL('../lib/', import.meta.url)
   const danger = [/backup/i, /\.bak\b/i, /\.old\b/i, /copyToTemp/i]
