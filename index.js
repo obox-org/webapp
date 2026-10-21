@@ -402,14 +402,14 @@ export default function webapp(api) {
     // ⚠️ `api.settings.get` 返回的可能是任意类型（设置项类型是 directory，但存储层不保证）⇒ String()
     const profileRoot = rootRaw === undefined || rootRaw === null ? '' : String(rootRaw)
     // 1.0.5（amendment 09 §4）：设置里被**回填**成默认根的绝对路径时，先按"它就是默认根"判一次。
-    // ⚠️ 1.0.7 收紧了 V5（不再因为"路径段里有名叫 obox 的目录"而拒绝），因此真实默认根本来
+    // ⚠️ 1.0.6 收紧了 V5（不再因为"路径段里有名叫 obox 的目录"而拒绝），因此真实默认根本来
     // 就能通过归一；这一步保留为**双保险**（不依赖 `normalizeRoot` 对某个具体路径的判定结果）。
     let rootVerdict = normalizeRoot(profileRoot)
     if (rootVerdict.kind === 'invalid' && defaultRootAbs && samePath(profileRoot, defaultRootAbs)) {
       rootVerdict = { kind: 'default' }
     }
     if (rootVerdict.kind === 'invalid') {
-      // ⚠️ 1.0.7：**这里只留痕，界面线索在 `webapp.migrationStatus`**（`writeMigrationStatus` 会把
+      // ⚠️ 1.0.6：**这里只留痕，界面线索在 `webapp.migrationStatus`**（`writeMigrationStatus` 会把
       // "设置值被拒绝：<原因>（配置值：<原样>）"写进只读状态项）。1.0.5 只有这一行控制台日志，
       // 于是"设置里显示着我的值、实际一直用默认根"对用户完全不可见——本次报障的一半。
       console.warn(
@@ -435,10 +435,10 @@ export default function webapp(api) {
    */
   let defaultRootAbs = ''
   /**
-   * **实际数据根**的探测结论（1.0.7）：`null` = 尚未探测；`{ root, isDefault, known, reason }`。
+   * **实际数据根**的探测结论（1.0.6）：`null` = 尚未探测；`{ root, isDefault, known, reason }`。
    *
    * 它回答的是"**数据现在真的在哪**"，与"设置里写了什么根"（`effectiveRootNow()`）是**两件事**——
-   * 这正是 1.0.7 修的核心缺陷：宿主设置页的 `directory` 控件会把用户选的值**立刻写进设置**，
+   * 这正是 1.0.6 修的核心缺陷：宿主设置页的 `directory` 控件会把用户选的值**立刻写进设置**，
    * 于是"设置值"必然等于"用户刚选的根"，用它当迁移的**源**只会得到 `same-as-current`（永不迁移），
    * 拿到它当**目标**又会得到 `无需迁移`（状态机入口直接返回）。因此迁移的源必须来自实际探测。
    *
@@ -541,7 +541,7 @@ export default function webapp(api) {
   }
 
   /**
-   * 状态项的**上下文**（1.0.7）：把"扩展到底读到了什么、采用了哪个"一次性交给纯函数
+   * 状态项的**上下文**（1.0.6）：把"扩展到底读到了什么、采用了哪个"一次性交给纯函数
    * `migrationStatusText`，让用户**只打开设置页**就能自查。字段含义见该纯函数的 JSDoc：
    *
    * - `root` / `isDefault` / `source`：**当前生效根**（未配置 = 默认根；已配置 = 配置值；
@@ -579,7 +579,7 @@ export default function webapp(api) {
    * 2. **值没变就不写**：避免"每搬一个条目都触发一次设置落盘 + `onChanged` 通知"；
    * 3. 失败只 warn（设置只是展示面，不该让迁移本身失败）。
    *
-   * ⚠️ 1.0.7：文本里**始终**带上"当前生效根 / 设置值"（`statusContext()`），不只是迁移进度——
+   * ⚠️ 1.0.6：文本里**始终**带上"当前生效根 / 设置值"（`statusContext()`），不只是迁移进度——
    * 没有未完成迁移时也要能看出扩展采用了哪个根、读到的设置值是什么、有没有被拒绝。
    *
    * @param {object|null} intent 迁移意图；`null` ⇒ 空闲文案 + 当前状态行
@@ -605,7 +605,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **迁移进度**的唯一写入点（1.0.7，amendment 09 §11）：写进 `webapp.migrationProgress`，
+   * **迁移进度**的唯一写入点（1.0.6，amendment 09 §11）：写进 `webapp.migrationProgress`，
    * 宿主据此渲染**不可关闭的等待模态框**（`type:'status'` + `modal:true`；值非空即弹、清空即消失）。
    *
    * ⚠️ **三条纪律**（每一条都关系到"用户会不会被永久锁在模态框里"）：
@@ -655,14 +655,14 @@ export default function webapp(api) {
    * **默认根回填**（1.0.5，amendment 09 §4）：设置里为空时，把解析出的默认根绝对路径
    * （`<扩展 data>/chrome`）写回 `webapp.profileRoot`，让设置页的目录选择框显示真实路径。
    *
-   * 时机（**1.0.7 变更**）：由激活期引导 `bootstrapRootsOnActivation()` **主动调用**并 `await`
+   * 时机（**1.0.6 变更**）：由激活期引导 `bootstrapRootsOnActivation()` **主动调用**并 `await`
    * ——扩展一激活就写，用户打开设置页立刻能看到真实路径。
    *
    * ⚠️ **1.0.5 的时机与它的问题**：1.0.5 把回填挂在 `ensureHelper().then()` 里（"本进程第一次连上
    * 助手之后"）且**没有 await**，因此实际时机 = "用户至少打开过一次扩展卡片"。用户报障正是
-   * "设置页看不到 / 显示不出当前路径"，所以 1.0.7 把它提前到激活期。
+   * "设置页看不到 / 显示不出当前路径"，所以 1.0.6 把它提前到激活期。
    *
-   * ⚠️ **只允许两个调用入口**：① 激活期引导 `bootstrapRootsOnActivation()`（`await`，1.0.7 起）；
+   * ⚠️ **只允许两个调用入口**：① 激活期引导 `bootstrapRootsOnActivation()`（`await`，1.0.6 起）；
    * ② 设置变更补做（2.0.0，`api.settings.onChanged` 里 —— 宿主模式下激活期那次可能因冷缓存跳过）。
    * **不得从 `ensureHelper` 里顺手调用**：那条路径是 fire-and-forget 的，与激活期引导会**互相抢跑**
    * （对账会拿到"数据根未知"）。两个入口之间的并发由 `backfillRunning` 挡掉，一次性结论由
@@ -728,13 +728,13 @@ export default function webapp(api) {
   }
 
   /**
-   * **设置页改根 ⇒ 自动开始迁移**（1.0.5，amendment 09 §2.6；**1.0.7 修好了"永不触发"**）。
+   * **设置页改根 ⇒ 自动开始迁移**（1.0.5，amendment 09 §2.6；**1.0.6 修好了"永不触发"**）。
    *
    * 用户决策：扩展页面不再有「迁移到此目录」按钮，因此"用户选了新目录"这件事由**设置变更通知**
    * 驱动——`onChanged(key === 'profileRoot')` 时走**与原来按钮完全相同**的状态机入口
    * （`startRootMigration`，自动覆盖确认照旧），全程静默、无任何界面交互。
    *
-   * ⚠️ **1.0.7 的根因修复**：1.0.5 这里把 `effectiveRootNow().root`（**从设置值推出来的**"生效根"）
+   * ⚠️ **1.0.6 的根因修复**：1.0.5 这里把 `effectiveRootNow().root`（**从设置值推出来的**"生效根"）
    * 当成"数据当前所在根"。而宿主设置页的 `directory` 控件在用户选完目录时就把它写进了设置，
    * 于是 `configured` 与 `dataRoot` **恒为同一个值** ⇒ 永远判 `same-as-current` ⇒ 1.0.3–1.0.5 的
    * "改根自动迁移"**事实上从未生效**（用户现场：设置里有值、profile 原地未动、目标目录不存在、
@@ -759,7 +759,7 @@ export default function webapp(api) {
   async function onProfileRootSettingChanged() {
     const settings = readSettings()
     const active = activeIntent()
-    // ⚠️ **1.0.7：这里的 `dataRoot` 必须是"数据实际在哪"，不能是 `effectiveRootNow()`**
+    // ⚠️ **1.0.6：这里的 `dataRoot` 必须是"数据实际在哪"，不能是 `effectiveRootNow()`**
     // （见 `resolveDataRoot()` 的 JSDoc）：宿主设置页把用户选的值立刻写进设置，而
     // `effectiveRootNow()` 就是从设置值推出来的 ⇒ 曾经恒有 `configured == dataRoot`
     // ⇒ 每次改根都判成 `same-as-current`、迁移**永不触发**（用户现场的全部症状）。
@@ -776,7 +776,7 @@ export default function webapp(api) {
       console.info(
         `[webapp] 忽略 ${SETTING_KEYS.profileRoot} 的这次变更（${plan.reason}${plan.detail ? `：${plan.detail}` : ''}）`
       )
-      // ⚠️ **被拒绝的值必须让用户在设置页看到**（1.0.7）：值非法时 `plan.reason` 是
+      // ⚠️ **被拒绝的值必须让用户在设置页看到**（1.0.6）：值非法时 `plan.reason` 是
       // `configured-invalid`，而 1.0.5 只留一行控制台日志——用户看到的就只有"设置里存着我的值"。
       // 状态文本里会带 `设置值被拒绝：<原因>（配置值：<原样>）`（纯函数 `migrationStatusText`）。
       // 其余 reason（同路径 / 空 / 迁移目标根 / 数据根未知）也顺手刷新一次状态，值没变时不写。
@@ -913,9 +913,9 @@ export default function webapp(api) {
   }
 
   /**
-   * **实际数据根**（1.0.7）：迁移的**源**只能来自这里，不能来自设置值。
+   * **实际数据根**（1.0.6）：迁移的**源**只能来自这里，不能来自设置值。
    *
-   * 为什么必须有它（1.0.7 的根因修复）：1.0.3–1.0.5 把 `effectiveRootNow()`（= 设置值 / 意图旧根）
+   * 为什么必须有它（1.0.6 的根因修复）：1.0.3–1.0.5 把 `effectiveRootNow()`（= 设置值 / 意图旧根）
    * 当成"数据当前所在根"传给 `planRootChangeTrigger` 与 `startRootMigration`。而宿主设置页的
    * `directory` 控件会把用户选的值**立刻写进设置**，于是那个"当前根"永远等于"刚选的目标根"：
    * - 触发判据 ⇒ `same-as-current` ⇒ **永不触发**（`onProfileRootSettingChanged` 静默返回）；
@@ -1056,7 +1056,7 @@ export default function webapp(api) {
    *    不再等界面确认——但**逐条**把"自动覆盖（不可恢复）"写进日志，并把"已覆盖 N 项（不可恢复）"
    *    写进状态文本（设置页只读项）；
    * 4. 终态 `done` ⇒ 写设置 → 删意图文件 → 生效根才切到新根；
-   * 5. **1.0.7：`finally` 必须清空 `webapp.migrationProgress`**（宿主的不可关闭等待模态框靠它关闭，
+   * 5. **1.0.6：`finally` 必须清空 `webapp.migrationProgress`**（宿主的不可关闭等待模态框靠它关闭，
    *    成功/失败/异常三条路径都必须走到，见那里的注释）。
    *
    * @param {{ to?: string, userDeclined?: boolean }} [options]
@@ -1078,7 +1078,7 @@ export default function webapp(api) {
 
       let current = intent
       writeMigrationStatus(current)
-      // 1.0.7：迁移真的开始了 ⇒ 挂上宿主的**不可关闭等待模态框**（`webapp.migrationProgress`）。
+      // 1.0.6：迁移真的开始了 ⇒ 挂上宿主的**不可关闭等待模态框**（`webapp.migrationProgress`）。
       // 这个值一旦非空，宿主会全屏遮罩设置页；**关闭的唯一信号是把它清空**（见 `.finally`）。
       writeMigrationProgress(current)
       // ① 重扫两个根（**不信上次的扫描结果**，规格 §7.3 ②）
@@ -1201,7 +1201,7 @@ export default function webapp(api) {
         return { intent: current, needsConfirm: false, conflicts: [], blocked: '写入设置失败' }
       }
       lastGoodRoot = current.to
-      // 数据已经全在新根 ⇒ 刷新"实际数据根"（1.0.7）：下次激活对账据此判 `same-as-current`，
+      // 数据已经全在新根 ⇒ 刷新"实际数据根"（1.0.6）：下次激活对账据此判 `same-as-current`，
       // 也就是"对账幂等"的落点（迁移完成后再激活 ⇒ 配置值 == 实际数据根 ⇒ 什么都不做）
       rememberMigratedRoot(current.to, 'migrated')
       writeMigrationStatus(current)
@@ -1229,7 +1229,7 @@ export default function webapp(api) {
         writeMigrationStatusText(`${migrationStatusText(interrupted, statusContext())}\n${reason}`)
         return { intent: interrupted, needsConfirm: false, conflicts: [], blocked: reason }
       })
-      // ⚠️ **1.0.7 的关键一行**：模态框的唯一关闭信号就是把 `migrationProgress` 清空。
+      // ⚠️ **1.0.6 的关键一行**：模态框的唯一关闭信号就是把 `migrationProgress` 清空。
       // **成功 / 失败 / 异常三条路径都会走到这里**——漏掉它的后果是**用户被永久锁在
       // 设置页的模态框里**（宿主对 `status + modal:true` 且值非空是"无关闭按钮、Esc 无效、
       // 点遮罩无效"）。清空**之后**状态项里仍有最终结论（已完成 / 失败摘要 / 中断原因）。
@@ -1768,7 +1768,7 @@ export default function webapp(api) {
    * 逐条写日志，并把"已覆盖 N 项（不可恢复）"写进设置页的状态项。
    * `confirmOverwrite` / `names` 两个入参**保留**（老界面/脚本的调用面不变，仍按原口径校验）。
    *
-   * ⚠️ **1.0.7：源根不再是"设置值"**，而是探测出来的**实际数据根**（`resolveDataRoot()`）；
+   * ⚠️ **1.0.6：源根不再是"设置值"**，而是探测出来的**实际数据根**（`resolveDataRoot()`）；
    * 有未完成意图时以意图的 `from` 为准。设置值只用来当**目标**（`params.root`）。
    *
    * 返回：
@@ -1790,7 +1790,7 @@ export default function webapp(api) {
       return fail('已有一次未完成的浏览器数据迁移，请先完成或放弃后再改根')
     }
 
-    // **迁移的源 = 实际数据根**（1.0.7 的根因修复，见 `resolveDataRoot()` 的 JSDoc）。
+    // **迁移的源 = 实际数据根**（1.0.6 的根因修复，见 `resolveDataRoot()` 的 JSDoc）。
     // ⚠️ 1.0.3–1.0.5 这里用的是 `effectiveRootNow()`（= 设置值）——而宿主设置页会把用户选的值
     // 立刻写进设置，于是它恒等于 `target.root` ⇒ `无需迁移` 直接返回，迁移永远不会发生。
     // 有未完成意图时**以意图里的 `from` 为准**（规格 §9.4：迁移中源根不可改，探到的实时命中数
@@ -1851,7 +1851,7 @@ export default function webapp(api) {
       })
     }
 
-    // 1.0.7：**真正动手之前**就挂上宿主的不关闭等待模态框（第一行 = `正在迁移浏览器数据：已搬 0/N`）。
+    // 1.0.6：**真正动手之前**就挂上宿主的不关闭等待模态框（第一行 = `正在迁移浏览器数据：已搬 0/N`）。
     // 放在这里（新建/续做意图都已确定、条目数已知）而不是等 `reconcileNow` 内部：
     // 下面的冲突预检要逐条问助手，条目多时会有可感知的延迟，用户点完目录就该看到进度。
     // ⚠️ 关闭信号只有一个：清空 `webapp.migrationProgress`（`reconcileIntent` 的 `finally`）；
@@ -2209,10 +2209,10 @@ export default function webapp(api) {
     })
   }
 
-  // ---- 激活期引导：默认根回填 + 改根对账（1.0.7）----
+  // ---- 激活期引导：默认根回填 + 改根对账（1.0.6）----
 
   /**
-   * **激活期对账**（1.0.7；这是"设置里的配置没生效"的**主修**）。
+   * **激活期对账**（1.0.6；这是"设置里的配置没生效"的**主修**）。
    *
    * 为什么必须有它：1.0.3–1.0.5 唯一的迁移触发点是 `api.settings.onChanged(profileRoot)`。
    * 用户改根时若扩展**当时没在跑**（1.0.4 的 `process is not defined` 崩溃态 / 未激活 / 事件
@@ -2247,7 +2247,7 @@ export default function webapp(api) {
           `[webapp] 激活期对账：无需迁移（${plan.reason}${plan.detail ? `：${plan.detail}` : ''}；` +
             `设置值 = ${settings.profileRoot || '（空）'}；实际数据根 = ${dataRoot || '未知'}）`
         )
-        // 没有未完成迁移时也要把**当前状态**写进设置项（1.0.7，用户自查的唯一界面落点）
+        // 没有未完成迁移时也要把**当前状态**写进设置项（1.0.6，用户自查的唯一界面落点）
         writeMigrationStatus(active)
         return
       }
@@ -2277,7 +2277,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **激活期引导**（1.0.7）：主动连助手 → 回填默认根 → 对账改根。
+   * **激活期引导**（1.0.6）：主动连助手 → 回填默认根 → 对账改根。
    *
    * ## 与规格 §17「不无谓拉起子进程」的取舍（**已裁定：主动拉起**）
    *
@@ -2285,7 +2285,7 @@ export default function webapp(api) {
    * 卡片**才能在设置页看到真实路径，而"改根"这件事更是完全依赖一个可能永远不来的事件
    * （用户现场的崩溃态就是如此）。两条现象合起来就是本次报障。
    *
-   * 因此 1.0.7 明确**推翻**这条局部纪律，理由与代价：
+   * 因此 1.0.6 明确**推翻**这条局部纪律，理由与代价：
    * 1. **没有第二条路**：宿主不向扩展暴露扩展 data 目录（`src/api/types.ts` 的 `fs` 只收相对路径），
    *    默认根的绝对路径**只能**问助手（助手的 `cwd` 就是 data 目录）；而"实际数据根"也必须靠
    *    助手的只读探测（`profileRootStatus`）才能判定。要"打开设置页就看到真实路径"+"补做错过的迁移"，
@@ -2301,7 +2301,7 @@ export default function webapp(api) {
    * ⚠️ 顺序**不可颠倒**：先回填（拿到 `defaultRootAbs`）→ 再对账（否则"实际数据根"未知，
    * 对账会保守地什么都不做）。
    *
-   * ⚠️ **1.0.7 自愈：进入对账之前先清空 `webapp.migrationProgress`**。宿主的模态框只看这个值，
+   * ⚠️ **1.0.6 自愈：进入对账之前先清空 `webapp.migrationProgress`**。宿主的模态框只看这个值，
    * 而它在 `localStorage` 里会**跨进程重启保留**：若上一次迁移在"写了进度但还没清空"时进程被杀
    * （宿主崩溃 / 任务管理器结束 / 断电），下次启动用户会在设置页看到一个**没有任何按钮的遮罩**。
    * 激活期先清空 ⇒ 这个死局永远不会出现（真要有迁移，紧接着的对账会重新写上它）。
@@ -2385,7 +2385,7 @@ export default function webapp(api) {
     }
   })
 
-  // ---- 激活（1.0.7）：注册与接线都就绪后，**主动**做一次"默认根回填 + 改根对账"。
+  // ---- 激活（1.0.6）：注册与接线都就绪后，**主动**做一次"默认根回填 + 改根对账"。
   // 不 await：激活本身必须立刻返回（卡片与消息分发已经可用），失败也只 warn（见该函数注释）。
   void bootstrapRootsOnActivation()
 
