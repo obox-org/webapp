@@ -5,6 +5,8 @@
 
 - 扩展 id：`webapp_chenzhi`（manifest `name: "webapp"` + `author: "chenzhi"`）
 - 版本：`1.0.6`｜`apiVersion: 1`
+- **运行位置：Extension Host Process**（obox `≥ 2.0.0` 起，用户扩展默认在独立 Node 进程里执行，
+  没有 DOM）——适配结论、sidecar 归属、`apiVersion` / 激活时机 / 设置语义见 **[§0](#0-运行位置与宿主适配obox-200-起)**
 - **所需宿主版本：obox `≥ 1.0.9`**（本版用到两种新增设置字段类型：`directory` 目录选择与 `status` 只读状态；
   老宿主不渲染它们——后果见 §3 的提示）；**迁移进度模态框另需宿主支持 `SettingField.modal`**
   （obox 在 `directory`/`status` 之后新增；老宿主只把它渲染成一行只读文本，**写入逻辑与安全性不受影响**）
@@ -39,6 +41,37 @@
 > ⑤ 迁移期间弹**不可关闭的等待模态框**（`webapp.migrationProgress`，成功/失败/异常三条路径都在
 > `finally` 里清空 ⇒ 自动关闭）。
 > 自查方法见 [§3.2](#32-配置没生效时怎么自查)（复盘见 `docs/spec/amendments/09-chrome-orphan-launch.md` §10/§11）。
+
+---
+
+## 0. 运行位置与宿主适配（obox 2.0.0 起）
+
+obox 2.0.0 把**用户扩展**（`.oix`，本扩展就是）从渲染进程搬进了 **Extension Host Process**：
+主进程用 Electron `utilityProcess` 拉起的独立 **Node 进程**（随主窗口同生共死），入口按 `file://`
+动态 `import()`；渲染进程只留贡献点注册与 UI。按这张事实表逐条核对了本扩展，结论汇总在下表：
+
+| 项                   | obox 2.0.0 的宿主事实                                                                                                                                                                                                          | 本扩展的现状 / 改动                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **运行位置**         | 宿主进程有**完整 Node**，但**没有 DOM / `window` / `document` / `localStorage`**；内置扩展仍在渲染进程                                                                                                                         | 入口**零 DOM 依赖**（全仓与 `localStorage` 有关的只有一处**注释**：说明宿主的模态框状态会跨进程重启保留，不是运行期使用）；`process` 只出现在 `typeof` 守卫里（渲染进程回退模式下它是 undefined，1.0.5 的崩溃态就是直接引用它）                                                                                                                                         |
+| **sidecar 谁 spawn** | `contributes.ipcChannels` 的 stdio 通道由**宿主自己 spawn**（渲染进程模式下由主进程 spawn）；`program` **相对扩展目录**解析（绝对路径 / `..` 一律拒），`cwd` = `<扩展目录>/data`，`.js/.cjs/.mjs` 用 `ELECTRON_RUN_AS_NODE` 跑 | 声明 `{"id":"webapp.helper","transport":"stdio","program":"./helper.cjs","framing":"ndjson"}`：**相对路径**、无 `args`、无绝对路径。助手用 `process.cwd()` 定位默认根（= 数据目录，两种模式下都是 `<扩展目录>/data`），`lib/*.mjs` 用 `__dirname` 加载（与 cwd 无关）⇒ **cwd 变化不影响任何行为**                                                                       |
+| **分帧**             | 宿主提供两种：`content-length`（按 **UTF-8 字节**计，不是字符数）与 `ndjson`                                                                                                                                                   | **本扩展自己不分帧**：`framing: "ndjson"`，协议循环用 `readline` 按行读 stdin（Node 的 readline 内部用 `StringDecoder` ⇒ **多字节字符跨 chunk 安全**，中文不会乱码/吞帧），stdout 只写 `JSON.stringify(...)+'\n'`（UTF-8），日志一律走 **stderr**                                                                                                                       |
+| **卡片页 URL**       | 宿主里 `import.meta.url` 是 `file://…/extensions/<安装目录名>/index.js`；子窗口 `url` **只认 `app:`**（渲染侧 CSP 是 `default-src 'self' app:`）                                                                               | **已修**：`extensionPageUrl()` 从入口路径反推**安装目录名**再拼 `app://extensions/<安装目录名>/ui/index.html`。不改会怎样：拼出来是 `file://…/ui/index.html`，被 CSP 拦掉 ⇒ **卡片子窗口白屏**                                                                                                                                                                          |
+| **`apiVersion`**     | 宿主 `apiVersion = 3`；清单里的 `apiVersion` 是"**最低宿主要求**"（缺省 = 0，高于宿主则拒绝加载）                                                                                                                              | 保持 **`1`**。理由：本扩展没有用到任何 v3 专属能力（渲染进程时代的能力面就够用），写 `3` 只会让 `≤1.0.17` 的老宿主**直接拒绝加载**，换不来任何好处（真实下限是 `≥1.0.9`，见文件开头的提示）                                                                                                                                                                             |
+| **激活时机**         | `activationEvents` 缺省（不写）= **`*`**，即启动即激活；四类事件：`*` / `onStartupFinished` / `onCommand:<id>` / `onView:<id>`                                                                                                 | **不声明**（= `*`）。理由：激活期必须**立刻**做"默认根回填 + 改根对账"（1.0.6 的修复，见 §4.2），换成 `onStartupFinished` 只会让这两件事更晚；本扩展也没有命令/视图可以懒加载（卡片是静态页）                                                                                                                                                                           |
+| **settings 语义**    | 值经桥回渲染侧**同一个 `stateStore`**（设置页与扩展读同一份，写后设置页立即刷新）；但 `api.settings.get` 在**第一份设置快照到达前返回缺省值**，且宿主**不通知**"快照已到"（首个快照按初始化处理、不触发 `onChanged`）          | **已修两处**（都是"把冷读到的空值当成用户真的没配"造成的不可逆后果，见 §4.2 第 3 条与第 7 条）：① **默认根回填**改为"先证明缓存已热（读到本扩展某个键的**非空**值）才写"，证明不了就**只跳过**，由 `onChanged` 或下次激活补做；② **清空迁移进度**改为**强制写**（不读当前值），否则冷缓存下"读到空串 == 要写的空串"会把自愈吞掉、用户被上次崩溃留下的不可关闭模态框锁住 |
+
+**渲染进程回退模式**（设置 → 通用关掉"在独立进程中运行扩展"，或宿主启动失败自动回退）与上面只有两条差异：
+① `process` 不存在（本扩展所有引用都过 `typeof`）；② 设置读数与设置页是**同一个** store，没有"快照未到"窗口
+⇒ 上面两个守卫自动失效、行为回到 1.0.6。**调试扩展**（`--debug-extension`）请用回退模式跑：宿主模式下入口路径
+推不出 `app://debug/<id>/…`，卡片页会回退成 `file://` 并在控制台告警。
+
+**已知代价（如实登记）**：全新安装的**第一次**激活里，设置 store 既没有 `profileRoot`（用户没配）也没有
+`migrationStatus`（上次会话还没写过）⇒ 拿不到"缓存已热"的正证据，本次**不回填**默认根（信息项
+「迁移状态」里仍有"当前生效根 = <默认根>"，用户不会有信息盲区），下一次激活或用户第一次改设置时补上。
+取舍是**宁可晚一次，也不覆盖用户配好的外部根**（覆盖不可恢复）。
+
+回归门禁：`test/hostMode.test.js`（卡片页 URL 不得是 `file://`、冷缓存不覆盖外部根、清空进度是强制写、
+热缓存仍回填、首次会话保守跳过）。
 
 ---
 
@@ -348,6 +381,11 @@ if (Test-Path $prof) { Remove-Item $prof -Recurse -Force }
    ⚠️ 为此 1.0.6 起**扩展激活时会主动连一次助手**（§17"不无谓拉起子进程"的取舍理由写在
    `index.js` 的 `bootstrapRootsOnActivation` 注释里）：代价是一个助手子进程提前起、一次只读的
    根状态查询；收益是"打开设置页就看到真实路径"+"补做错过的迁移"。连不上时只记一行 warn，不影响任何功能。
+   ⚠️ **2.0.0（宿主模式）再加一道闸门：写之前先证明"设置缓存已热"**（读到本扩展某个键的**非空**值）。
+   宿主里 `api.settings.get` 在第一份快照到达前返回缺省值，而回填判据把空串当"用户没配"——
+   冷缓存那一刻若你配过**外部根**，回填会把默认根写进设置、**覆盖掉你的配置**（不可恢复：原值不会回来，
+   之后 Chrome 还按默认根起、登录态看起来"没了"）。证明不了就**只跳过**（空串本身就等于"用默认根"，
+   语义不变），由 `onChanged` 或下次激活补做。代价：全新安装的第一次激活不会回填（见 §0「已知代价」）。
 4. **写"迁移状态"绝不会改根**：`webapp.migrationStatus` 与 `webapp.profileRoot` 是两个独立的键，
    改根判定只读后者（有源码门禁）。
 5. **在设置页选中新目录 = 自动开始迁移**：扩展只订阅设置变更，不做任何界面交互——
@@ -373,6 +411,9 @@ if (Test-Path $prof) { Remove-Item $prof -Recurse -Force }
    （参见 `test/migrationProgress.test.js`：三条路径逐条断言"结束后进度必为空"）。
    另外两处兜底：① **激活时先清一次**（防"上一次迁移途中进程被杀 ⇒ 进度残留在 `localStorage` ⇒
    下次启动一个打不开的遮罩"）；② 扩展停用/卸载时尽力清一次。
+   ⚠️ **2.0.0（宿主模式）**：激活期那次清空是**强制写**（不读当前值）。宿主里 `api.settings.get`
+   在第一份快照到达前返回**缺省空串**，而清空的目标值也是空串 ⇒ 依赖读数的"值没变不写"会把这次自愈
+   **静默吞掉**，遮罩照样打不开。写空串本身幂等，多写一次的代价远小于把用户锁死。
 
 ### 4.3 已知坑（1.0.6 清理/收紧）
 
@@ -453,8 +494,10 @@ src/                 Vue 界面源码（App.vue + components/* + fields.js + bri
 ui/                  界面构建产物（进包）
 scripts/pack.mjs     打包 .oix（显式排除 data/、out/、node_modules/、.git/、src/、docs/、test/、scripts/）
 test/                node --test 单测（profileRoot / rootMigration / migrationStatus / migrationProgress
-                     （**唯一**用宿主 mock 驱动入口的用例：模态框进度的三条结束路径）/ chromeLaunch /
-                     helper / ipcSurface / componentSource …）
+                     / **hostMode**（宿主模式门禁：卡片页必须是 `app://`、设置冷缓存下不覆盖外部根、
+                     清空进度是强制写）/ chromeLaunch / helper / ipcSurface / componentSource …）；
+                     其中 **migrationProgress** 与 **hostMode** 是仅有的两个用宿主 mock 驱动入口的用例
+                     （前者钉模态框进度的三条结束路径，后者钉宿主模式的不可逆动作）
 out/                 打包产物（不进包、不提交）
 ```
 
@@ -462,13 +505,16 @@ out/                 打包产物（不进包、不提交）
 
 ```powershell
 cd extensions/webapp
-node --test                    # 单元测试（277 例）
+node --test                    # 单元测试（282 例；含 test/hostMode.test.js 的宿主模式门禁）
 npx prettier --check .         # 代码风格
 npm run build                  # 构建 ui/
 node scripts/pack.mjs          # 打包（产物自检：无 data/、无 src/）
-cd ../..
-node skills/obox-ext-dev/scripts/validate-manifest.mjs extensions/webapp/manifest.json
+# 清单校验（脚本在 obox 仓库根的 scripts/，不在 skill 目录里）
+node <obox 仓库根>/scripts/validate-manifest.mjs extensions/webapp/manifest.json
 ```
+
+> 一键全跑：`npm run release`（= `npm test` + `npm run build` + `npm run pack`）。
+> `out/*.oix` 与 `ui/` 都在 `.gitignore` 里（构建产物不提交）。
 
 ### 6.3 同步纪律（把构建产物同步到已安装目录时）
 
@@ -524,6 +570,18 @@ node scripts/pack.mjs          # → out/webapp-<version>.oix
     （另一路在宿主侧实现）；老宿主上它退化为一行只读文本，**不构成锁定风险**；
   - "迁移途中进程被杀 ⇒ 下次启动清掉残留进度"这条自愈路径**只做了源码门禁 + mock 断言**
     （激活期先 `clearMigrationProgress()`），未在真机上制造"杀进程"场景复现。
+- **obox 2.0.0（宿主模式）新增的覆盖缺口**（如实登记；本节 §0 的结论都只做过源码核对 + `node --test`）：
+  - **未实机跑过宿主模式**：卡片能否在宿主模式下打开（`app://extensions/webapp_chenzhi/ui/index.html`
+    由 `import.meta.url` 反推目录名）、sidecar 由宿主 spawn 后的真实 `cwd`/数据落点、以及
+    `process.versions.node` 是否与宿主一致——本轮只有 `test/hostMode.test.js` 的静态判据（URL 形状）
+    与宿主 mock；
+  - **"设置缓存冷启动"的两条守卫只在 mock 上验证**（`test/hostMode.test.js` 用"`get` 一律返回缺省值"
+    模拟未热）：真机时序（端口投递 → 快照 → init → 激活）下**实际会不会冷**未测；若真机从不冷，
+    守卫只是多一层保险（热缓存时判据等价于 1.0.6）；
+  - **首次会话不回填默认根**是刻意取舍（§0「已知代价」），真机表现（设置页目录框先空、下次激活出现）
+    未验证；
+  - **`--debug-extension` 在宿主模式下不可用**（入口路径推不出 `app://debug/<id>/…`，卡片页会回退成
+    `file://` 并告警）：调试请用渲染进程回退模式，未做进一步适配。
 
 ---
 

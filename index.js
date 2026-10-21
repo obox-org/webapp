@@ -1,12 +1,25 @@
 /**
  * 网页应用扩展入口（用户扩展，纯 ESM，经 .oix 安装到 `userData/extensions/webapp_chenzhi/`）。
  *
+ * ## 运行位置（obox 2.0.0 起，ADR-0026）
+ *
+ * 本模块在 **Extension Host Process**（Electron `utilityProcess`，**完整 Node**、**没有 DOM /
+ * `window` / `document` / `localStorage`**）里被宿主按 `file://` 动态 `import()`；渲染进程里只留
+ * 贡献点注册与 UI。因此本文件**不得**出现任何 DOM/浏览器全局（`grep` 只有一处注释提到
+ * `localStorage`，是说明宿主的模态框状态会跨进程重启保留，不是运行期使用）。
+ * 渲染进程回退模式（设置里关掉宿主开关 / 宿主启动失败）仍可跑：唯一的差异是 `process` 不存在
+ * （所有引用都过 `typeof`，见 `IS_HOST_PROCESS`）。
+ *
  * 组成（规格 §9.3 / §22）：
- * - `api.app.register` 注册 **一张 App 卡片** → 子窗口加载 `ui/index.html`（Vite 构建产物）
+ * - `api.app.register` 注册 **一张 App 卡片** → 子窗口加载 `ui/index.html`（Vite 构建产物）；
+ *   页面 URL **必须**是 `app://extensions/<安装目录名>/ui/index.html`（见 `extensionPageUrl`）
  * - `api.app.onMessage` 提供方法集，一律返回 `{ ok, data | error }`，**不抛错**
  * - `api.sqlite.open('webapp.db')` 存条目（扁平列，字段名与界面 `src/fields.js` 一一对应）
- * - `api.ipc` 通道 `webapp.helper`（manifest 静态声明，stdio + ndjson）拉起 `helper.cjs`：
- *   它负责探测 Chrome、按白名单参数 spawn、以及全部 profile 目录操作
+ * - `api.ipc` 通道 `webapp.helper`（manifest `contributes.ipcChannels` 静态声明，stdio + ndjson）
+ *   拉起 `helper.cjs`：它负责探测 Chrome、按白名单参数 spawn、以及全部 profile 目录操作。
+ *   **子进程由宿主 spawn**（渲染进程模式下由主进程 spawn），`program` 相对扩展目录解析、
+ *   `cwd` = `<扩展目录>/data`、`.cjs` 用 `ELECTRON_RUN_AS_NODE` 跑；分帧是**宿主提供**的
+ *   ndjson（按字节切行），本扩展**自己不分帧**
  *
  * 消息契约（与 `src/bridge.js` 对齐）：
  *   页面 → 宿主：`{ source:'obox-app', action:'obox-extension', appId:'webapp.main', channel:'webapp',
@@ -80,7 +93,7 @@ const ROOT_UNMARKED = '[profile-root-unmarked]'
 /** 迁移意图文件的相对路径（**写在扩展 data 目录**，不随根移动；规格 D4 / U-5） */
 const ROOT_INTENT_REL = ROOT_INTENT
 /** 扩展版本（五处一致：manifest / package / package-lock ×2 / 卡片注册） */
-const EXT_VERSION = '1.0.6'
+const EXT_VERSION = '1.0.7'
 /**
  * 「浏览…」的**降级文案**（规格 §7.4 的表；老宿主/能力探测失败时回给界面）。
  * 必须诚实：不承诺"一定能选目录"，并明确告诉用户下一步怎么做。
@@ -123,6 +136,85 @@ const TIMEOUTS = Object.freeze({
  */
 const CARD_ICON =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="15" rx="1.8"/><path d="M2.5 8.2h19"/><circle cx="12" cy="14.2" r="3.4"/><path d="M8.7 14.2h6.6M12 10.8c1.1 1 1.6 2.1 1.6 3.4s-.5 2.4-1.6 3.4M12 10.8c-1.1 1-1.6 2.1-1.6 3.4s.5 2.4 1.6 3.4"/></svg>'
+
+/**
+ * **是否跑在 Extension Host Process 里**（obox 2.0.0 起用户扩展的默认运行位置）。
+ *
+ * 宿主进程是完整 Node（`process` 存在）；渲染进程回退模式（设置里关掉宿主开关 / 宿主启动失败
+ * 自动回退）里没有 `process` 这个全局——1.0.5 的崩溃态就是直接引用它导致的。所以判据必须过
+ * `typeof`（不抛 ReferenceError），且只在**确实**有 `process.versions.node` 时才算宿主。
+ */
+const IS_HOST_PROCESS = typeof process !== 'undefined' && typeof process.versions?.node === 'string'
+
+/**
+ * 强制写迁移进度时用的"当前值"哨兵。
+ *
+ * 用途见 `writeMigrationProgress`：清空进度**不能依赖**一次 `api.settings.get` 的结果
+ * （宿主模式下那份缓存可能是冷的，缺省值恰好也是空串，于是"值没变不写"会把清空吞掉）。
+ * 用一个不可能等于任何真实文本的值，让去重判定在强制模式下永不成立。
+ */
+const FORCED_PROGRESS_CURRENT = '\u0000forced-clear'
+
+/**
+ * 证明"设置缓存已热"的探针键（见 `settingsCacheIsWarm`）。
+ *
+ * 全部是本扩展**自己的**键：冷缓存下 `get` 恒返回我们传的缺省值，因此**读到非空值**就是
+ * "渲染侧的第一份设置快照已经到达"的铁证。`migrationStatus` 排第一：每次激活期的对账都会写它。
+ */
+const WARM_PROBE_KEYS = Object.freeze([
+  SETTING_KEYS.migrationStatus,
+  SETTING_KEYS.profileRoot,
+  SETTING_KEYS.profileLimitMb,
+  SETTING_KEYS.diskCacheMb
+])
+
+/**
+ * 把入口文件所在目录映射成 `app://extensions/<安装目录名>/<relPath>`（2.0.0 宿主适配）。
+ *
+ * ## 为什么不能用 `new URL(rel, import.meta.url)`
+ *
+ * 宿主模式（用户扩展跑在 Extension Host Process）下入口是宿主按**磁盘路径** `import()` 的，
+ * `import.meta.url` 是 `file:///…/extensions/webapp_chenzhi/index.js`，直接拼出来就是
+ * `file://…/ui/index.html`。而 App 子窗口的 `url` **只认 `app:`**：
+ * - 主进程只为 `app:` 注册了协议处理器（`src/main/protocol.ts` 的
+ *   `app://extensions/<id>/<rest>` → `userData/extensions/<id>/<rest>`）；
+ * - 渲染侧 CSP 是 `default-src 'self' app:`（`src/renderer/index.html`，`frame-src` 回落它），
+ *   `file:` **不在放行名单**里；开发态父文档还是 `http://localhost:5173`，`file:` 必被拦。
+ * ⇒ 不改会怎样：**卡片子窗口白屏**（`file://` 被 CSP 拦或落到无关的 origin 上）。
+ *
+ * ## 判据
+ *
+ * - 入口本身是 `app://`（渲染进程回退模式 / 调试扩展）⇒ 相对解析即可，host 天然正确
+ *   （`extensions` / `builtin` / `debug` 都对）；
+ * - 入口是 `file://`（宿主模式）⇒ 从路径反推**安装目录名**（`<manifest.name>_<清洗后 author>`，
+ *   如 `webapp_chenzhi`）再拼 `app://extensions/…`。**不能硬编码 `webapp`**：安装目录带作者名。
+ *
+ * 已知限制：`--debug-extension` 的目录不在 `userData/extensions/` 下、id 也由命令行指定，
+ * 宿主模式下无法反推 `app://debug/<id>/…` ⇒ 这种情况回退成 `file://` 并告警（调试扩展请用
+ * 渲染进程回退模式跑：`OBOX_EXTENSION_HOST=0`）。
+ *
+ * @param {string} relPath 扩展目录内的相对路径（如 `'./ui/index.html'`）
+ * @returns {string} 子窗口可加载的绝对 URL
+ */
+function extensionPageUrl(relPath) {
+  const entry = new URL(import.meta.url)
+  const rel = String(relPath).replace(/^\.\//, '')
+  if (entry.protocol === 'app:') return new URL(rel, entry).href
+  const segments = entry.pathname.split(/[\\/]/).filter(Boolean)
+  segments.pop() // 入口文件名（index.js）
+  const dirName = decodeURIComponent(segments.pop() ?? '')
+  const parent = (segments.pop() ?? '').toLowerCase()
+  if (dirName && parent === 'extensions') return `app://extensions/${dirName}/${rel}`
+  const fallback = new URL(rel, entry).href
+  console.warn(
+    `[webapp] 无法从入口路径反推 app:// 页面地址（${entry.href}）⇒ 卡片页回退成 ${fallback}；` +
+      '调试扩展请用渲染进程回退模式（OBOX_EXTENSION_HOST=0）'
+  )
+  return fallback
+}
+
+/** App 卡片页 URL（`ui/index.html` 的构建产物；见 `extensionPageUrl` 的注释） */
+const PAGE_URL = extensionPageUrl('./ui/index.html')
 
 /** 错误归一：任何抛出物 → 可读单行文本 */
 function messageOf(err) {
@@ -310,14 +402,14 @@ export default function webapp(api) {
     // ⚠️ `api.settings.get` 返回的可能是任意类型（设置项类型是 directory，但存储层不保证）⇒ String()
     const profileRoot = rootRaw === undefined || rootRaw === null ? '' : String(rootRaw)
     // 1.0.5（amendment 09 §4）：设置里被**回填**成默认根的绝对路径时，先按"它就是默认根"判一次。
-    // ⚠️ 1.0.6 收紧了 V5（不再因为"路径段里有名叫 obox 的目录"而拒绝），因此真实默认根本来
+    // ⚠️ 1.0.7 收紧了 V5（不再因为"路径段里有名叫 obox 的目录"而拒绝），因此真实默认根本来
     // 就能通过归一；这一步保留为**双保险**（不依赖 `normalizeRoot` 对某个具体路径的判定结果）。
     let rootVerdict = normalizeRoot(profileRoot)
     if (rootVerdict.kind === 'invalid' && defaultRootAbs && samePath(profileRoot, defaultRootAbs)) {
       rootVerdict = { kind: 'default' }
     }
     if (rootVerdict.kind === 'invalid') {
-      // ⚠️ 1.0.6：**这里只留痕，界面线索在 `webapp.migrationStatus`**（`writeMigrationStatus` 会把
+      // ⚠️ 1.0.7：**这里只留痕，界面线索在 `webapp.migrationStatus`**（`writeMigrationStatus` 会把
       // "设置值被拒绝：<原因>（配置值：<原样>）"写进只读状态项）。1.0.5 只有这一行控制台日志，
       // 于是"设置里显示着我的值、实际一直用默认根"对用户完全不可见——本次报障的一半。
       console.warn(
@@ -343,10 +435,10 @@ export default function webapp(api) {
    */
   let defaultRootAbs = ''
   /**
-   * **实际数据根**的探测结论（1.0.6）：`null` = 尚未探测；`{ root, isDefault, known, reason }`。
+   * **实际数据根**的探测结论（1.0.7）：`null` = 尚未探测；`{ root, isDefault, known, reason }`。
    *
    * 它回答的是"**数据现在真的在哪**"，与"设置里写了什么根"（`effectiveRootNow()`）是**两件事**——
-   * 这正是 1.0.6 修的核心缺陷：宿主设置页的 `directory` 控件会把用户选的值**立刻写进设置**，
+   * 这正是 1.0.7 修的核心缺陷：宿主设置页的 `directory` 控件会把用户选的值**立刻写进设置**，
    * 于是"设置值"必然等于"用户刚选的根"，用它当迁移的**源**只会得到 `same-as-current`（永不迁移），
    * 拿到它当**目标**又会得到 `无需迁移`（状态机入口直接返回）。因此迁移的源必须来自实际探测。
    *
@@ -359,8 +451,38 @@ export default function webapp(api) {
   let rootIntent = undefined
   /** `list` 的"懒对账只跑一次"开关（规格 §9.4 触发点） */
   let rootIntentChecked = false
-  /** 默认根回填是否已试过（进程内一次；幂等，失败不重试以免每次调用都写设置） */
+  /**
+   * 默认根回填是否已**得出确定结论**（进程内一次；幂等）。
+   *
+   * ⚠️ 2.0.0 起语义收紧：**只有**"判据基于真实设置值"（已写出，或明确判定不该写）时才置位。
+   * 因为宿主模式下读取可能是**冷缓存**（缺省值），此时既不能写、也不能算"试过了"——
+   * 要留给 `onChanged` 或下次激活再补（见 `backfillDefaultRoot` / `settingsCacheIsWarm`）。
+   */
   let defaultRootBackfilled = false
+  /** 回填在途（`onChanged` 的补做与激活期引导可能撞在一起；重复 `profileRootStatus` 是白费） */
+  let backfillRunning = false
+  /**
+   * **设置缓存是否已热**（2.0.0 宿主适配，只用于"要不要**写**"这种不可逆决定）。
+   *
+   * 事实：宿主进程里 `api.settings.get` 读的是渲染侧推上来的**设置快照缓存**，第一份快照到达前
+   * 返回**缺省值**（`src/extension-host/capabilities/ui-plane.ts` 的 `settings.get` + `warnColdCache`）；
+   * 而宿主**不通知**"第一份快照已到"（首个快照按**初始化**处理、不触发 `onChanged`，见同文件
+   * `applySnapshot` 的 `initialization` 早退）⇒ 扩展侧**无法区分**"用户确实没配"与"缓存还没热"。
+   *
+   * 因此判据只能是**正证据**：读到**我们自己某个键的非空值**——冷缓存下 `get` 恒返回我们传的
+   * 缺省值，读到非空值就说明快照已经写进缓存了。空值（含缺省）**不构成任何证明**，按"未热"处理。
+   * 渲染进程回退模式下设置读数与设置页是同一个 `stateStore`，没有这个窗口 ⇒ 直接算热。
+   *
+   * @returns {boolean} `true` = 可以相信 `api.settings.get` 的读数
+   */
+  function settingsCacheIsWarm() {
+    if (!IS_HOST_PROCESS) return true
+    if (!api.settings?.get) return true
+    return WARM_PROBE_KEYS.some((key) => {
+      const value = api.settings.get(key, '')
+      return value !== undefined && value !== null && String(value) !== ''
+    })
+  }
   /** 串行化迁移对账（同一时刻只跑一次） */
   let reconcileChain = null
   /**
@@ -419,7 +541,7 @@ export default function webapp(api) {
   }
 
   /**
-   * 状态项的**上下文**（1.0.6）：把"扩展到底读到了什么、采用了哪个"一次性交给纯函数
+   * 状态项的**上下文**（1.0.7）：把"扩展到底读到了什么、采用了哪个"一次性交给纯函数
    * `migrationStatusText`，让用户**只打开设置页**就能自查。字段含义见该纯函数的 JSDoc：
    *
    * - `root` / `isDefault` / `source`：**当前生效根**（未配置 = 默认根；已配置 = 配置值；
@@ -457,7 +579,7 @@ export default function webapp(api) {
    * 2. **值没变就不写**：避免"每搬一个条目都触发一次设置落盘 + `onChanged` 通知"；
    * 3. 失败只 warn（设置只是展示面，不该让迁移本身失败）。
    *
-   * ⚠️ 1.0.6：文本里**始终**带上"当前生效根 / 设置值"（`statusContext()`），不只是迁移进度——
+   * ⚠️ 1.0.7：文本里**始终**带上"当前生效根 / 设置值"（`statusContext()`），不只是迁移进度——
    * 没有未完成迁移时也要能看出扩展采用了哪个根、读到的设置值是什么、有没有被拒绝。
    *
    * @param {object|null} intent 迁移意图；`null` ⇒ 空闲文案 + 当前状态行
@@ -483,7 +605,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **迁移进度**的唯一写入点（1.0.6，amendment 09 §11）：写进 `webapp.migrationProgress`，
+   * **迁移进度**的唯一写入点（1.0.7，amendment 09 §11）：写进 `webapp.migrationProgress`，
    * 宿主据此渲染**不可关闭的等待模态框**（`type:'status'` + `modal:true`；值非空即弹、清空即消失）。
    *
    * ⚠️ **三条纪律**（每一条都关系到"用户会不会被永久锁在模态框里"）：
@@ -492,14 +614,26 @@ export default function webapp(api) {
    * 2. 文本来自纯函数 `migrationProgressText(intent)`（终态返回空串 ⇒ 双保险）；
    * 3. 值没变不写、失败只 warn（模态框不该因为写失败把迁移本身搞失败）。
    *
+   * ⚠️ **`options.force`（2.0.0 宿主适配）**：强制模式**不看"当前值"**。宿主进程里
+   * `api.settings.get` 读的是渲染侧推上来的设置快照缓存，**第一份快照到达前返回缺省值**，而这里要
+   * 清空成的目标值恰好就是缺省空串 ⇒ "值没变不写"会把清空**静默吞掉**（自愈失效，用户继续被上次
+   * 崩溃留下的**不可关闭模态框**锁住）。因此清空路径用 `FORCED_PROGRESS_CURRENT` 当"当前值"，
+   * 让下面的去重判定永不成立。
+   *
    * @param {string|object|null} value 文本，或直接传迁移意图（由纯函数转文本）
+   * @param {{ force?: boolean }} [options] `force: true` ⇒ 跳过"值没变不写"（清空专用）
    */
-  function writeMigrationProgress(value) {
+  function writeMigrationProgress(value, options) {
     const text =
       value && typeof value === 'object' ? migrationProgressText(value) : String(value ?? '')
     try {
       if (!api.settings?.set) return
-      const current = api.settings.get ? api.settings.get(SETTING_KEYS.migrationProgress, '') : ''
+      const current =
+        options?.force === true
+          ? FORCED_PROGRESS_CURRENT
+          : api.settings.get
+            ? api.settings.get(SETTING_KEYS.migrationProgress, '')
+            : ''
       if (String(current ?? '') === text) return
       api.settings.set(SETTING_KEYS.migrationProgress, text)
     } catch (err) {
@@ -507,34 +641,50 @@ export default function webapp(api) {
     }
   }
 
-  /** 清空迁移进度 ⇒ **关闭宿主的等待模态框**（所有结束路径都必须走到这里） */
+  /**
+   * 清空迁移进度 ⇒ **关闭宿主的等待模态框**（所有结束路径都必须走到这里）。
+   *
+   * ⚠️ 用 `force`（2.0.0）：清空**不得**建立在"读到当前值"上——宿主模式下冷缓存的缺省值就是
+   * 空串，"值没变不写"会把这次自愈静默掉。写空串本身幂等，多写一次的代价远小于把用户锁死。
+   */
   function clearMigrationProgress() {
-    writeMigrationProgress('')
+    writeMigrationProgress('', { force: true })
   }
 
   /**
    * **默认根回填**（1.0.5，amendment 09 §4）：设置里为空时，把解析出的默认根绝对路径
    * （`<扩展 data>/chrome`）写回 `webapp.profileRoot`，让设置页的目录选择框显示真实路径。
    *
-   * 时机（**1.0.6 变更**）：由激活期引导 `bootstrapRootsOnActivation()` **主动调用**并 `await`
+   * 时机（**1.0.7 变更**）：由激活期引导 `bootstrapRootsOnActivation()` **主动调用**并 `await`
    * ——扩展一激活就写，用户打开设置页立刻能看到真实路径。
    *
    * ⚠️ **1.0.5 的时机与它的问题**：1.0.5 把回填挂在 `ensureHelper().then()` 里（"本进程第一次连上
    * 助手之后"）且**没有 await**，因此实际时机 = "用户至少打开过一次扩展卡片"。用户报障正是
-   * "设置页看不到 / 显示不出当前路径"，所以 1.0.6 把它提前到激活期。
+   * "设置页看不到 / 显示不出当前路径"，所以 1.0.7 把它提前到激活期。
    *
-   * ⚠️ **不得再从 `ensureHelper` 里顺手调用**：那条路径是 fire-and-forget 的，与激活期引导会
-   * **互相抢跑**（回填的幂等开关在函数入口就置位，于是引导里 `await` 到的那次调用会立刻返回、
-   * `defaultRootAbs` 还没写进去）⇒ 对账会拿到"数据根未知"。单测钉住"只有一个调用点"。
+   * ⚠️ **只允许两个调用入口**：① 激活期引导 `bootstrapRootsOnActivation()`（`await`，1.0.7 起）；
+   * ② 设置变更补做（2.0.0，`api.settings.onChanged` 里 —— 宿主模式下激活期那次可能因冷缓存跳过）。
+   * **不得从 `ensureHelper` 里顺手调用**：那条路径是 fire-and-forget 的，与激活期引导会**互相抢跑**
+   * （对账会拿到"数据根未知"）。两个入口之间的并发由 `backfillRunning` 挡掉，一次性结论由
+   * `defaultRootBackfilled` 记录，因此不会重复写设置。
    *
    * **绝不触发迁移**：只写 `profileRoot` 一个键，不写意图文件、不调用 `reconcileIntent`；
    * 且回填值经 `treatAsDefaultRoot()` 仍按"默认根"处理 ⇒ `effectiveRoot` / 开关形态 / 卡片文案
    * 与回填前逐字一致（这正是"规范化比较后才写、同路径不写"的用意）。
    * 判据（含"非法值不覆盖""别的自定义根不覆盖"）全部在纯函数 `planDefaultRootBackfill` 里，有单测。
+   *
+   * ⚠️ **2.0.0 宿主适配：写之前必须先证明"读到的是真的设置值"**（见 `settingsCacheIsWarm`）。
+   * 宿主进程里 `api.settings.get` 在**第一份设置快照到达前返回缺省值**（空串），而
+   * `planDefaultRootBackfill` 把空串判成 `configured-empty ⇒ write: true`。不改会怎样：
+   * 冷缓存那一刻若用户**配过外部根**，本函数会把**默认根写进设置，覆盖掉用户的配置**
+   * —— 设置页里用户的值消失，之后 Chrome 按默认根起（登录态看起来"没了"），且这个覆盖
+   * **不可恢复**（原来的值不会再回来）。所以证明不了"缓存已热"就**只跳过、不写、也不置一次性开关**，
+   * 由 `onChanged`（设置缓存已热的证据）或下次激活再补。
    */
   async function backfillDefaultRoot() {
     if (defaultRootBackfilled) return
-    defaultRootBackfilled = true
+    if (backfillRunning) return
+    backfillRunning = true
     try {
       const status = await callHelper('profileRootStatus', {})
       const root = String(status?.root ?? '').trim()
@@ -553,25 +703,38 @@ export default function webapp(api) {
             `[webapp] 不回填 ${SETTING_KEYS.profileRoot}（${plan.reason}）；默认根 = ${root}`
           )
         }
+        // 判据是"基于真实设置值"得出的结论 ⇒ 一次性开关可以关掉，不必再试
+        defaultRootBackfilled = true
+        return
+      }
+      if (!settingsCacheIsWarm()) {
+        // 读到空串有两种可能：用户确实没配 / 宿主的第一份设置快照还没到。二者不可区分 ⇒
+        // **宁可不回填**（空串本身就等于"用默认根"，语义不变），等有正证据再说。
+        console.info(
+          '[webapp] 宿主设置快照还没到，本次不回填默认根（收到设置变更或下次激活时再试）'
+        )
         return
       }
       api.settings.set(SETTING_KEYS.profileRoot, plan.root)
+      defaultRootBackfilled = true
       console.info(
         `[webapp] 已把默认根写回 ${SETTING_KEYS.profileRoot} = ${plan.root}（${plan.reason}；不触发迁移）`
       )
     } catch (err) {
       console.warn(`[webapp] 默认根回填失败（不影响其它功能）：${messageOf(err)}`)
+    } finally {
+      backfillRunning = false
     }
   }
 
   /**
-   * **设置页改根 ⇒ 自动开始迁移**（1.0.5，amendment 09 §2.6；**1.0.6 修好了"永不触发"**）。
+   * **设置页改根 ⇒ 自动开始迁移**（1.0.5，amendment 09 §2.6；**1.0.7 修好了"永不触发"**）。
    *
    * 用户决策：扩展页面不再有「迁移到此目录」按钮，因此"用户选了新目录"这件事由**设置变更通知**
    * 驱动——`onChanged(key === 'profileRoot')` 时走**与原来按钮完全相同**的状态机入口
    * （`startRootMigration`，自动覆盖确认照旧），全程静默、无任何界面交互。
    *
-   * ⚠️ **1.0.6 的根因修复**：1.0.5 这里把 `effectiveRootNow().root`（**从设置值推出来的**"生效根"）
+   * ⚠️ **1.0.7 的根因修复**：1.0.5 这里把 `effectiveRootNow().root`（**从设置值推出来的**"生效根"）
    * 当成"数据当前所在根"。而宿主设置页的 `directory` 控件在用户选完目录时就把它写进了设置，
    * 于是 `configured` 与 `dataRoot` **恒为同一个值** ⇒ 永远判 `same-as-current` ⇒ 1.0.3–1.0.5 的
    * "改根自动迁移"**事实上从未生效**（用户现场：设置里有值、profile 原地未动、目标目录不存在、
@@ -596,7 +759,7 @@ export default function webapp(api) {
   async function onProfileRootSettingChanged() {
     const settings = readSettings()
     const active = activeIntent()
-    // ⚠️ **1.0.6：这里的 `dataRoot` 必须是"数据实际在哪"，不能是 `effectiveRootNow()`**
+    // ⚠️ **1.0.7：这里的 `dataRoot` 必须是"数据实际在哪"，不能是 `effectiveRootNow()`**
     // （见 `resolveDataRoot()` 的 JSDoc）：宿主设置页把用户选的值立刻写进设置，而
     // `effectiveRootNow()` 就是从设置值推出来的 ⇒ 曾经恒有 `configured == dataRoot`
     // ⇒ 每次改根都判成 `same-as-current`、迁移**永不触发**（用户现场的全部症状）。
@@ -613,7 +776,7 @@ export default function webapp(api) {
       console.info(
         `[webapp] 忽略 ${SETTING_KEYS.profileRoot} 的这次变更（${plan.reason}${plan.detail ? `：${plan.detail}` : ''}）`
       )
-      // ⚠️ **被拒绝的值必须让用户在设置页看到**（1.0.6）：值非法时 `plan.reason` 是
+      // ⚠️ **被拒绝的值必须让用户在设置页看到**（1.0.7）：值非法时 `plan.reason` 是
       // `configured-invalid`，而 1.0.5 只留一行控制台日志——用户看到的就只有"设置里存着我的值"。
       // 状态文本里会带 `设置值被拒绝：<原因>（配置值：<原样>）`（纯函数 `migrationStatusText`）。
       // 其余 reason（同路径 / 空 / 迁移目标根 / 数据根未知）也顺手刷新一次状态，值没变时不写。
@@ -750,9 +913,9 @@ export default function webapp(api) {
   }
 
   /**
-   * **实际数据根**（1.0.6）：迁移的**源**只能来自这里，不能来自设置值。
+   * **实际数据根**（1.0.7）：迁移的**源**只能来自这里，不能来自设置值。
    *
-   * 为什么必须有它（1.0.6 的根因修复）：1.0.3–1.0.5 把 `effectiveRootNow()`（= 设置值 / 意图旧根）
+   * 为什么必须有它（1.0.7 的根因修复）：1.0.3–1.0.5 把 `effectiveRootNow()`（= 设置值 / 意图旧根）
    * 当成"数据当前所在根"传给 `planRootChangeTrigger` 与 `startRootMigration`。而宿主设置页的
    * `directory` 控件会把用户选的值**立刻写进设置**，于是那个"当前根"永远等于"刚选的目标根"：
    * - 触发判据 ⇒ `same-as-current` ⇒ **永不触发**（`onProfileRootSettingChanged` 静默返回）；
@@ -893,7 +1056,7 @@ export default function webapp(api) {
    *    不再等界面确认——但**逐条**把"自动覆盖（不可恢复）"写进日志，并把"已覆盖 N 项（不可恢复）"
    *    写进状态文本（设置页只读项）；
    * 4. 终态 `done` ⇒ 写设置 → 删意图文件 → 生效根才切到新根；
-   * 5. **1.0.6：`finally` 必须清空 `webapp.migrationProgress`**（宿主的不可关闭等待模态框靠它关闭，
+   * 5. **1.0.7：`finally` 必须清空 `webapp.migrationProgress`**（宿主的不可关闭等待模态框靠它关闭，
    *    成功/失败/异常三条路径都必须走到，见那里的注释）。
    *
    * @param {{ to?: string, userDeclined?: boolean }} [options]
@@ -915,7 +1078,7 @@ export default function webapp(api) {
 
       let current = intent
       writeMigrationStatus(current)
-      // 1.0.6：迁移真的开始了 ⇒ 挂上宿主的**不可关闭等待模态框**（`webapp.migrationProgress`）。
+      // 1.0.7：迁移真的开始了 ⇒ 挂上宿主的**不可关闭等待模态框**（`webapp.migrationProgress`）。
       // 这个值一旦非空，宿主会全屏遮罩设置页；**关闭的唯一信号是把它清空**（见 `.finally`）。
       writeMigrationProgress(current)
       // ① 重扫两个根（**不信上次的扫描结果**，规格 §7.3 ②）
@@ -1038,7 +1201,7 @@ export default function webapp(api) {
         return { intent: current, needsConfirm: false, conflicts: [], blocked: '写入设置失败' }
       }
       lastGoodRoot = current.to
-      // 数据已经全在新根 ⇒ 刷新"实际数据根"（1.0.6）：下次激活对账据此判 `same-as-current`，
+      // 数据已经全在新根 ⇒ 刷新"实际数据根"（1.0.7）：下次激活对账据此判 `same-as-current`，
       // 也就是"对账幂等"的落点（迁移完成后再激活 ⇒ 配置值 == 实际数据根 ⇒ 什么都不做）
       rememberMigratedRoot(current.to, 'migrated')
       writeMigrationStatus(current)
@@ -1066,7 +1229,7 @@ export default function webapp(api) {
         writeMigrationStatusText(`${migrationStatusText(interrupted, statusContext())}\n${reason}`)
         return { intent: interrupted, needsConfirm: false, conflicts: [], blocked: reason }
       })
-      // ⚠️ **1.0.6 的关键一行**：模态框的唯一关闭信号就是把 `migrationProgress` 清空。
+      // ⚠️ **1.0.7 的关键一行**：模态框的唯一关闭信号就是把 `migrationProgress` 清空。
       // **成功 / 失败 / 异常三条路径都会走到这里**——漏掉它的后果是**用户被永久锁在
       // 设置页的模态框里**（宿主对 `status + modal:true` 且值非空是"无关闭按钮、Esc 无效、
       // 点遮罩无效"）。清空**之后**状态项里仍有最终结论（已完成 / 失败摘要 / 中断原因）。
@@ -1158,6 +1321,16 @@ export default function webapp(api) {
   const offSettings =
     typeof api.settings?.onChanged === 'function'
       ? api.settings.onChanged((key) => {
+          // 2.0.0（宿主模式）：宿主**不通知**"第一份设置快照已到"（首个快照按初始化处理、不触发
+          // `onChanged`），所以"任何一次设置变更"是我们唯一能拿到的"缓存已热"证据。激活期若因
+          // 冷缓存跳过了默认根回填，就在这里补做一次（判据仍在 `backfillDefaultRoot` 里；
+          // 回填成功后顺手刷新只读状态项——否则状态里的"设置值"会停在冷缓存时读到的空串）。
+          // ⚠️ 必须排在下面按 key 分派的**前面**：它与管理状态文案无关，任何键的变化都算证据。
+          if (!defaultRootBackfilled && !backfillRunning) {
+            void backfillDefaultRoot().then(() => {
+              if (defaultRootBackfilled) writeMigrationStatus(activeIntent())
+            })
+          }
           // ⚠️ 只有**三个真正的配置键**才作废体积缓存：`migrationStatus` 是迁移过程自己写的
           // **展示用**状态（每搬一个条目都可能变），把它算进"设置变更"会让体积缓存无谓失效。
           // 同时保证"写状态"与"改根"互不影响（改根判定只读 `profileRoot`，见 `readSettings`）。
@@ -1595,7 +1768,7 @@ export default function webapp(api) {
    * 逐条写日志，并把"已覆盖 N 项（不可恢复）"写进设置页的状态项。
    * `confirmOverwrite` / `names` 两个入参**保留**（老界面/脚本的调用面不变，仍按原口径校验）。
    *
-   * ⚠️ **1.0.6：源根不再是"设置值"**，而是探测出来的**实际数据根**（`resolveDataRoot()`）；
+   * ⚠️ **1.0.7：源根不再是"设置值"**，而是探测出来的**实际数据根**（`resolveDataRoot()`）；
    * 有未完成意图时以意图的 `from` 为准。设置值只用来当**目标**（`params.root`）。
    *
    * 返回：
@@ -1617,7 +1790,7 @@ export default function webapp(api) {
       return fail('已有一次未完成的浏览器数据迁移，请先完成或放弃后再改根')
     }
 
-    // **迁移的源 = 实际数据根**（1.0.6 的根因修复，见 `resolveDataRoot()` 的 JSDoc）。
+    // **迁移的源 = 实际数据根**（1.0.7 的根因修复，见 `resolveDataRoot()` 的 JSDoc）。
     // ⚠️ 1.0.3–1.0.5 这里用的是 `effectiveRootNow()`（= 设置值）——而宿主设置页会把用户选的值
     // 立刻写进设置，于是它恒等于 `target.root` ⇒ `无需迁移` 直接返回，迁移永远不会发生。
     // 有未完成意图时**以意图里的 `from` 为准**（规格 §9.4：迁移中源根不可改，探到的实时命中数
@@ -1678,7 +1851,7 @@ export default function webapp(api) {
       })
     }
 
-    // 1.0.6：**真正动手之前**就挂上宿主的不关闭等待模态框（第一行 = `正在迁移浏览器数据：已搬 0/N`）。
+    // 1.0.7：**真正动手之前**就挂上宿主的不关闭等待模态框（第一行 = `正在迁移浏览器数据：已搬 0/N`）。
     // 放在这里（新建/续做意图都已确定、条目数已知）而不是等 `reconcileNow` 内部：
     // 下面的冲突预检要逐条问助手，条目多时会有可感知的延迟，用户点完目录就该看到进度。
     // ⚠️ 关闭信号只有一个：清空 `webapp.migrationProgress`（`reconcileIntent` 的 `finally`）；
@@ -2036,10 +2209,10 @@ export default function webapp(api) {
     })
   }
 
-  // ---- 激活期引导：默认根回填 + 改根对账（1.0.6）----
+  // ---- 激活期引导：默认根回填 + 改根对账（1.0.7）----
 
   /**
-   * **激活期对账**（1.0.6；这是"设置里的配置没生效"的**主修**）。
+   * **激活期对账**（1.0.7；这是"设置里的配置没生效"的**主修**）。
    *
    * 为什么必须有它：1.0.3–1.0.5 唯一的迁移触发点是 `api.settings.onChanged(profileRoot)`。
    * 用户改根时若扩展**当时没在跑**（1.0.4 的 `process is not defined` 崩溃态 / 未激活 / 事件
@@ -2074,7 +2247,7 @@ export default function webapp(api) {
           `[webapp] 激活期对账：无需迁移（${plan.reason}${plan.detail ? `：${plan.detail}` : ''}；` +
             `设置值 = ${settings.profileRoot || '（空）'}；实际数据根 = ${dataRoot || '未知'}）`
         )
-        // 没有未完成迁移时也要把**当前状态**写进设置项（1.0.6，用户自查的唯一界面落点）
+        // 没有未完成迁移时也要把**当前状态**写进设置项（1.0.7，用户自查的唯一界面落点）
         writeMigrationStatus(active)
         return
       }
@@ -2104,7 +2277,7 @@ export default function webapp(api) {
   }
 
   /**
-   * **激活期引导**（1.0.6）：主动连助手 → 回填默认根 → 对账改根。
+   * **激活期引导**（1.0.7）：主动连助手 → 回填默认根 → 对账改根。
    *
    * ## 与规格 §17「不无谓拉起子进程」的取舍（**已裁定：主动拉起**）
    *
@@ -2112,7 +2285,7 @@ export default function webapp(api) {
    * 卡片**才能在设置页看到真实路径，而"改根"这件事更是完全依赖一个可能永远不来的事件
    * （用户现场的崩溃态就是如此）。两条现象合起来就是本次报障。
    *
-   * 因此 1.0.6 明确**推翻**这条局部纪律，理由与代价：
+   * 因此 1.0.7 明确**推翻**这条局部纪律，理由与代价：
    * 1. **没有第二条路**：宿主不向扩展暴露扩展 data 目录（`src/api/types.ts` 的 `fs` 只收相对路径），
    *    默认根的绝对路径**只能**问助手（助手的 `cwd` 就是 data 目录）；而"实际数据根"也必须靠
    *    助手的只读探测（`profileRootStatus`）才能判定。要"打开设置页就看到真实路径"+"补做错过的迁移"，
@@ -2128,10 +2301,18 @@ export default function webapp(api) {
    * ⚠️ 顺序**不可颠倒**：先回填（拿到 `defaultRootAbs`）→ 再对账（否则"实际数据根"未知，
    * 对账会保守地什么都不做）。
    *
-   * ⚠️ **1.0.6 自愈：进入对账之前先清空 `webapp.migrationProgress`**。宿主的模态框只看这个值，
+   * ⚠️ **1.0.7 自愈：进入对账之前先清空 `webapp.migrationProgress`**。宿主的模态框只看这个值，
    * 而它在 `localStorage` 里会**跨进程重启保留**：若上一次迁移在"写了进度但还没清空"时进程被杀
    * （宿主崩溃 / 任务管理器结束 / 断电），下次启动用户会在设置页看到一个**没有任何按钮的遮罩**。
    * 激活期先清空 ⇒ 这个死局永远不会出现（真要有迁移，紧接着的对账会重新写上它）。
+   *
+   * ⚠️ **2.0.0：这次清空必须"强制写"**（`clearMigrationProgress` → `{ force: true }`）。宿主进程里
+   * `api.settings.get` 在第一份设置快照到达前**返回缺省空串**，而清空的目标值也正好是空串 ⇒
+   * 依赖读数的"值没变不写"会把这次自愈**静默吞掉**，用户继续被上次崩溃留下的遮罩锁住。
+   * 清空不得以任何读数为前提。
+   *
+   * ⚠️ **2.0.0：回填可能"跳过"（冷缓存）**，此时它**不置**一次性开关，由 `onChanged` 或下次激活补做；
+   * 对账在冷缓存下必然判 `configured-empty`（不动），因此这个顺序在宿主模式下仍然安全。
    */
   async function bootstrapRootsOnActivation() {
     clearMigrationProgress()
@@ -2156,9 +2337,10 @@ export default function webapp(api) {
     author: 'chenzhi',
     description: '网页应用：以 Chrome 应用模式打开内部站点，按条目独立 profile',
     icon: CARD_ICON,
-    // ⚠️ 必须用 import.meta.url 推导：安装目录名是 `webapp_chenzhi`，
-    // 硬编码 `app://extensions/webapp/` 会 404
-    url: new URL('./ui/index.html', new URL('.', import.meta.url)).href,
+    // ⚠️ **不能**直接 `new URL('./ui/index.html', import.meta.url)`：宿主模式下 `import.meta.url`
+    // 是 `file://…`（宿主按磁盘路径 import 入口），拼出来的 `file://` 页面会被渲染侧 CSP 拦掉
+    // ⇒ 卡片白屏。必须拼 `app://extensions/<安装目录名>/…`，见 `extensionPageUrl` 与 `PAGE_URL`。
+    url: PAGE_URL,
     multiOpen: false, // 重复点击聚焦已有窗口（不新建）
     width: 1024,
     height: 720
@@ -2203,7 +2385,7 @@ export default function webapp(api) {
     }
   })
 
-  // ---- 激活（1.0.6）：注册与接线都就绪后，**主动**做一次"默认根回填 + 改根对账"。
+  // ---- 激活（1.0.7）：注册与接线都就绪后，**主动**做一次"默认根回填 + 改根对账"。
   // 不 await：激活本身必须立刻返回（卡片与消息分发已经可用），失败也只 warn（见该函数注释）。
   void bootstrapRootsOnActivation()
 
@@ -2281,12 +2463,15 @@ export async function uninstall(ctx) {
 /**
  * 供维护与测试复用的常量（也让打包器把这些导出视为被引用）。
  * 注意：`LANG_VALUES` / `SCALE_VALUES` 的**定义**在 `lib/entryFields.mjs`，这里只是转出。
+ * `PAGE_URL` 是 App 卡片页地址（必须是 `app://extensions/<安装目录名>/ui/index.html`，
+ * 见 `extensionPageUrl`；`test/hostMode.test.js` 用它钉住"不得是 `file://`"）。
  */
 export const WEBAPP_CONSTANTS = Object.freeze({
   APP_ID,
   DB_NAME,
   CHANNEL_ID,
   OVER_LIMIT,
+  PAGE_URL,
   TIMEOUTS,
   LANG_VALUES,
   SCALE_VALUES
