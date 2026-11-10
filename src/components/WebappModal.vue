@@ -94,19 +94,19 @@ function submit() {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="obox-modal__mask">
     <div
-      class="modal"
+      class="obox-modal__panel"
       role="dialog"
       aria-modal="true"
       aria-labelledby="webapp-modal-title"
       tabindex="-1"
     >
-      <header class="modal__header">
-        <h2 id="webapp-modal-title" class="modal__title">{{ title }}</h2>
+      <header class="obox-modal__header">
+        <h2 id="webapp-modal-title" class="obox-title obox-title--h3">{{ title }}</h2>
         <button
           type="button"
-          class="btn modal__close"
+          class="obox-btn obox-btn--ghost obox-btn--icon"
           aria-label="关闭"
           :disabled="submitting"
           @click="emit('close')"
@@ -115,10 +115,10 @@ function submit() {
         </button>
       </header>
 
-      <div class="modal__body">
-        <p v-if="errorBanner" class="alert alert--error">{{ errorBanner }}</p>
+      <div class="obox-modal__body">
+        <p v-if="errorBanner" class="obox-alert obox-alert--danger obox-mb-4">{{ errorBanner }}</p>
 
-        <div v-for="group in COMMON_GROUPS" :key="group.title" class="form-group">
+        <div v-for="group in COMMON_GROUPS" :key="group.title" class="obox-form-section">
           <WebappField
             v-for="field in visibleFields(group)"
             :key="field.key"
@@ -129,10 +129,10 @@ function submit() {
           />
         </div>
 
-        <div class="accordion">
+        <div class="obox-disclosure">
           <button
             type="button"
-            class="accordion__toggle"
+            class="obox-disclosure__toggle"
             :aria-expanded="advancedOpen"
             aria-controls="webapp-advanced"
             @click="advancedOpen = !advancedOpen"
@@ -140,8 +140,8 @@ function submit() {
             <span aria-hidden="true">{{ advancedOpen ? '▾' : '▸' }}</span>
             高级选项
           </button>
-          <div v-show="advancedOpen" id="webapp-advanced" class="accordion__body">
-            <div v-for="group in ADVANCED_GROUPS" :key="group.title" class="form-group">
+          <div v-show="advancedOpen" id="webapp-advanced" class="obox-disclosure__body">
+            <div v-for="group in ADVANCED_GROUPS" :key="group.title" class="obox-form-section">
               <WebappField
                 v-for="field in visibleFields(group)"
                 :key="field.key"
@@ -151,19 +151,19 @@ function submit() {
                 @change="onChange"
               />
             </div>
-            <p class="accordion__hint">
+            <p class="obox-text obox-text--sm obox-text--secondary">
               同一站点的窗口正开着时，新设置一律不生效，请先关闭该站点的窗口再打开。
             </p>
           </div>
         </div>
       </div>
 
-      <footer class="modal__footer">
-        <button type="button" class="btn" :disabled="submitting" @click="emit('close')">
+      <footer class="obox-modal__footer">
+        <button type="button" class="obox-btn" :disabled="submitting" @click="emit('close')">
           取消
         </button>
-        <button type="button" class="btn btn--primary" :disabled="submitting" @click="submit">
-          <span v-if="submitting" class="spinner" aria-hidden="true"></span>
+        <button type="button" class="obox-btn obox-btn--primary" :disabled="submitting" @click="submit">
+          <span v-if="submitting" class="obox-spinner" aria-hidden="true"></span>
           {{ submitting ? '保存中…' : '保存' }}
         </button>
       </footer>

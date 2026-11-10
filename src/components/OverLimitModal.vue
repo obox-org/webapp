@@ -54,19 +54,19 @@ const message = computed(() =>
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="obox-modal__mask">
     <div
-      class="modal"
+      class="obox-modal__panel"
       role="dialog"
       aria-modal="true"
       aria-labelledby="webapp-limit-title"
       tabindex="-1"
     >
-      <header class="modal__header">
-        <h2 id="webapp-limit-title" class="modal__title">「{{ name }}」的浏览器数据超过上限</h2>
+      <header class="obox-modal__header">
+        <h2 id="webapp-limit-title" class="obox-title obox-title--h3">「{{ name }}」的浏览器数据超过上限</h2>
       </header>
-      <div class="modal__body">
-        <ul class="limit-list">
+      <div class="obox-modal__body">
+        <ul class="obox-list obox-mb-4">
           <li>
             当前占用：<strong>{{ formatBytes(bytes) }}</strong>
           </li>
@@ -77,29 +77,29 @@ const message = computed(() =>
             可清理缓存：<strong>{{ formatBytes(cacheBytes) }}</strong>
           </li>
         </ul>
-        <p class="modal__text">{{ message }}</p>
-        <p class="modal__hint">
+        <p class="obox-text">{{ message }}</p>
+        <p class="obox-text obox-text--sm obox-text--secondary">
           超限只是打开前拦截，<strong>不会</strong>自动删除任何数据；「仍然打开」不改变设置，下次打开仍会拦截。
         </p>
       </div>
-      <footer class="modal__footer">
+      <footer class="obox-modal__footer">
         <button
           ref="cancelButton"
           type="button"
-          class="btn"
+          class="obox-btn"
           :disabled="busy"
           @click="emit('close')"
         >
           取消
         </button>
-        <button type="button" class="btn" :disabled="busy" @click="emit('force')">仍然打开</button>
+        <button type="button" class="obox-btn" :disabled="busy" @click="emit('force')">仍然打开</button>
         <button
           type="button"
-          class="btn btn--primary"
+          class="obox-btn obox-btn--primary"
           :disabled="busy || !cleanWouldHelp"
           @click="emit('clean')"
         >
-          <span v-if="busy" class="spinner" aria-hidden="true"></span>
+          <span v-if="busy" class="obox-spinner" aria-hidden="true"></span>
           {{ busy ? '清理中…' : '清理缓存并打开' }}
         </button>
       </footer>

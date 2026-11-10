@@ -442,33 +442,33 @@ function formatBytes(bytes) {
 </script>
 
 <template>
-  <div class="app">
-    <header class="app__header">
-      <h1 class="app__title">网页应用</h1>
-      <div class="app__actions">
-        <button type="button" class="btn" :disabled="envChecking" @click="checkEnvironment">
+  <div class="obox-page">
+    <header class="obox-page__header">
+      <h1 class="obox-title obox-title--h2">网页应用</h1>
+      <div class="obox-row obox-row--center obox-gap-2">
+        <button type="button" class="obox-btn" :disabled="envChecking" @click="checkEnvironment">
           {{ envChecking ? '检查中…' : '环境检查' }}
         </button>
-        <button type="button" class="btn" @click="cleanAllOpen = true">清理全部缓存</button>
-        <button type="button" class="btn btn--primary" @click="openCreate">＋ 新建</button>
+        <button type="button" class="obox-btn" @click="cleanAllOpen = true">清理全部缓存</button>
+        <button type="button" class="obox-btn obox-btn--primary" @click="openCreate">＋ 新建</button>
       </div>
     </header>
 
-    <main class="app__main">
+    <main class="obox-page__body">
       <!-- profile 根迁移**不在界面上显示任何东西**（1.0.4，用户决策）：迁移只在启动时
            `reconcileRootSilently()` 静默续做，进度与异常只进控制台（见 `scripts` 段的注释与
            `docs/spec/amendments/09-chrome-orphan-launch.md`）。三处界面例外（迁移状态行 /
            未受管警示行 / 覆盖确认框）已全部移除。 -->
 
-      <p v-if="loading" class="app__loading">正在加载…</p>
-      <p v-else-if="loadError" class="alert alert--error">{{ loadError }}</p>
+      <p v-if="loading" class="obox-text obox-text--sm obox-text--secondary">正在加载…</p>
+      <p v-else-if="loadError" class="obox-alert obox-alert--danger obox-mb-4">{{ loadError }}</p>
       <template v-else>
         <!-- 搜索框（v1.0.2）：只在确实有条目时出现；输入即过滤，Esc 清空。
-             形态与 extensions/rdp 的搜索框**逐项一致**：胶囊形 + 内嵌放大镜 + 限宽 400px。 -->
-        <div class="search">
-          <div class="search__field">
-            <!-- 放大镜：描边取 currentColor（颜色由 CSS 的 token 决定，这里不写任何色值） -->
-            <svg class="search__icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+             形态与 extensions/rdp 的搜索框**逐项一致**：胶囊前缀图标 + 限宽 400px（宽度由页面布局决定）。 -->
+        <div class="obox-input-group obox-mb-4">
+          <!-- 放大镜：描边取 currentColor（颜色由组件库/主题 token 决定，这里不写任何色值） -->
+          <span class="obox-input-group__prefix" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14">
               <circle
                 cx="6.5"
                 cy="6.5"
@@ -485,16 +485,16 @@ function formatBytes(bytes) {
                 stroke-linecap="round"
               />
             </svg>
-            <input
-              ref="searchInput"
-              v-model="query"
-              type="text"
-              class="input search__input"
-              placeholder="搜索名称 / 地址 / 说明"
-              aria-label="搜索网页应用"
-              @keydown.esc="clearQuery"
-            />
-          </div>
+          </span>
+          <input
+            ref="searchInput"
+            v-model="query"
+            type="text"
+            class="obox-input"
+            placeholder="搜索名称 / 地址 / 说明"
+            aria-label="搜索网页应用"
+            @keydown.esc="clearQuery"
+          />
         </div>
 
         <EmptyState
@@ -511,7 +511,7 @@ function formatBytes(bytes) {
           hint="换个关键词试试；按 Esc 清空搜索框即可恢复全部"
           :show-action="false"
         />
-        <div v-else class="app__grid">
+        <div v-else class="obox-card-grid">
           <WebappCard
             v-for="row in displayRows"
             :key="row.id"
@@ -562,35 +562,35 @@ function formatBytes(bytes) {
     />
 
     <!-- 全局清理的二次确认：文案必须写清"保留登录状态"与"先关闭窗口" -->
-    <div v-if="cleanAllOpen" class="overlay">
+    <div v-if="cleanAllOpen" class="obox-modal__mask">
       <div
-        class="modal modal--sm"
+        class="obox-modal__panel obox-modal__panel--sm"
         role="dialog"
         aria-modal="true"
         aria-labelledby="webapp-clean-title"
       >
-        <header class="modal__header">
-          <h2 id="webapp-clean-title" class="modal__title">清理全部站点的网页缓存？</h2>
+        <header class="obox-modal__header">
+          <h2 id="webapp-clean-title" class="obox-title obox-title--h3">清理全部站点的网页缓存？</h2>
         </header>
-        <div class="modal__body">
-          <p class="modal__text">
+        <div class="obox-modal__body">
+          <p class="obox-text">
             会删除所有站点的网页缓存，但保留登录状态与 Cookie；清理期间请先关闭这些站点的窗口。
           </p>
-          <p class="modal__hint">
+          <p class="obox-text obox-text--sm obox-text--secondary">
             只清缓存目录，不动条目、不动登录态；被占用的目录会跳过并如实报告。
           </p>
         </div>
-        <footer class="modal__footer">
-          <button type="button" class="btn" :disabled="cleanAllBusy" @click="cleanAllOpen = false">
+        <footer class="obox-modal__footer">
+          <button type="button" class="obox-btn" :disabled="cleanAllBusy" @click="cleanAllOpen = false">
             取消
           </button>
           <button
             type="button"
-            class="btn btn--primary"
+            class="obox-btn obox-btn--primary"
             :disabled="cleanAllBusy"
             @click="confirmCleanAll"
           >
-            <span v-if="cleanAllBusy" class="spinner" aria-hidden="true"></span>
+            <span v-if="cleanAllBusy" class="obox-spinner" aria-hidden="true"></span>
             {{ cleanAllBusy ? '清理中…' : '清理全部缓存' }}
           </button>
         </footer>

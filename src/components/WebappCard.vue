@@ -77,38 +77,38 @@ function formatBytes(bytes) {
 </script>
 
 <template>
-  <article class="card" :class="{ 'card--busy': state === 'opening' }">
-    <div class="card__head">
-      <h3 class="card__title" :title="`${name}｜${cardTitle}`">{{ name }}</h3>
+  <article class="obox-card" :aria-busy="state === 'opening'">
+    <div class="obox-card__header">
+      <h3 class="obox-title obox-title--h3 obox-truncate" :title="`${name}｜${cardTitle}`">{{ name }}</h3>
       <span
         v-if="tlsDegraded"
-        class="tls-badge"
+        class="obox-tag obox-tag--warning"
         title="该条目的证书校验已关闭，流量可能被同网段攻击者读取或改写。"
         >TLS 已降级</span
       >
     </div>
-    <p class="card__url" :title="url">{{ url }}</p>
-    <p class="card__subtitle">{{ desc }}</p>
-    <p v-if="sizeText || sizeLoading" class="card__size">
+    <p class="obox-text obox-text--sm obox-text--secondary obox-truncate" :title="url">{{ url }}</p>
+    <p class="obox-text obox-text--sm obox-text--secondary obox-truncate">{{ desc }}</p>
+    <p v-if="sizeText || sizeLoading" class="obox-text obox-text--sm obox-text--secondary">
       {{ sizeLoading ? '正在统计大小…' : sizeText }}
     </p>
 
-    <div class="card__actions">
+    <div class="obox-card__footer">
       <button
         type="button"
-        class="btn"
+        class="obox-btn"
         :aria-label="`打开 ${name}`"
         :disabled="state === 'opening'"
         @click="emit('open')"
       >
         {{ state === 'opening' ? '正在打开…' : '打开' }}
       </button>
-      <button type="button" class="btn" :aria-label="`编辑 ${name}`" @click="emit('edit')">
+      <button type="button" class="obox-btn" :aria-label="`编辑 ${name}`" @click="emit('edit')">
         编辑
       </button>
       <button
         type="button"
-        class="btn"
+        class="obox-btn"
         :aria-label="`查看 ${name} 的体积`"
         :disabled="sizeLoading"
         @click="emit('size')"
@@ -117,7 +117,7 @@ function formatBytes(bytes) {
       </button>
       <button
         type="button"
-        class="btn btn--danger"
+        class="obox-btn obox-btn--danger"
         :aria-label="`删除 ${name}`"
         @click="emit('delete')"
       >
