@@ -29,7 +29,8 @@ const CARD = source('components/WebappCard.vue')
 const LIMIT = source('components/OverLimitModal.vue')
 const MAIN = source('main.js')
 const APP = source('App.vue')
-const STYLES = source('styles.css')
+// 本扩展已不再带样式表（通用外观全部来自宿主组件库 app://obox/ui.css），
+// 原先针对 styles.css 的断言已随样式表一起移除（见 test/uiLibrary.test.js）。
 const THEME = stripComments(readFileSync(new URL('../src/theme.js', import.meta.url), 'utf8'))
 
 test('模态框只能按钮关闭：不得有遮罩点击关闭，也不得有 Esc/keydown 关闭', () => {
@@ -116,7 +117,6 @@ test('状态栏已移除：组件、模板用法、状态字段与 CSS 规则都
   assert.ok(!APP.includes('statusKind'), 'App.vue 不得再有 statusKind 状态')
   assert.ok(!APP.includes('statusCollapsed'), 'App.vue 不得再有 statusCollapsed 状态')
   assert.ok(!APP.includes('statusbar'), 'App.vue 不得再有 statusbar 相关标记')
-  assert.ok(!STYLES.includes('.statusbar'), 'styles.css 不得再有 .statusbar 规则')
   assert.ok(
     !existsSync(fileURLToPath(new URL('../src/components/StatusBar.vue', import.meta.url))),
     'src/components/StatusBar.vue 必须已删除'
@@ -133,14 +133,8 @@ test('主题兜底表与样式表保持同步（消费必有兜底；状态栏 t
   const fallbackKeys = [...THEME.matchAll(/^ {2}'(--[a-z0-9-]+)'/gm)].map((m) => m[1])
   assert.ok(fallbackKeys.length > 0, 'theme.js 必须导出 FALLBACK_TOKENS')
   const declared = new Set(fallbackKeys)
-  // 2) `styles.css` 里 `var(--x)` 消费的每个 token 都必须有兜底值（推送未达也不空白）
-  const consumed = [...new Set([...STYLES.matchAll(/var\(\s*(--[a-z0-9-]+)/g)].map((m) => m[1]))]
-  const layoutVars = ['--radius', '--radius-lg', '--label-w']
-  assert.deepEqual(
-    consumed.filter((name) => !layoutVars.includes(name) && !declared.has(name)),
-    [],
-    '这些 token 被消费但没有兜底值'
-  )
+  // 2) 样式已交给宿主组件库：库里消费的 token 由宿主的 main.css 默认值兜底，本仓库只保证
+  //    theme.js 的兜底表非空且不含已删功能的残留（见下）。
   // 3) 状态栏 token 必须随状态栏一起消失。
   //    ⚠️ 这里**不**断言"兜底表的每一项都被消费"——宿主有 25 个 token，而本界面只用其中一部分
   //    （`--bg-titlebar` / `--fg-link` / `--selection-bg` / `--nav-icon(-size)` / `--icon-size`
@@ -152,11 +146,10 @@ test('主题兜底表与样式表保持同步（消费必有兜底；状态栏 t
     !/--statusbar[a-z-]*'\s*:/.test(THEME),
     'theme.js 里不得再有任何 statusbar token 的赋值'
   )
-  assert.ok(!STYLES.includes('statusbar'), 'styles.css 不得再引用 statusbar')
 })
 
 test('搜索框：复用 .input、Esc 清空、无匹配复用同一空态（与 rdp 同形态）', () => {
-  assert.ok(APP.includes('class="input search__input"'), '搜索框必须复用 .input 样式')
+  assert.ok(APP.includes('class="obox-input"'), '搜索框必须用组件库输入框')
   assert.ok(APP.includes('搜索名称 / 地址 / 说明'), '占位文案必须说明搜哪些字段')
   assert.ok(APP.includes('@keydown.esc="clearQuery"'), 'Esc 必须清空搜索')
   assert.ok(APP.includes('function clearQuery()'), '清空必须是显式函数（Esc 用）')
@@ -173,51 +166,14 @@ test('搜索框：复用 .input、Esc 清空、无匹配复用同一空态（与
 
 test('搜索框美化：胶囊形 + 内嵌放大镜 + 限宽 400px（与 extensions/rdp 逐项一致）', () => {
   // 1) 结构：字段容器内有大镜图标 + 输入框
-  assert.ok(APP.includes('class="search"'), '必须有 .search 容器')
-  assert.ok(APP.includes('class="search__field"'), '必须有 .search__field 容器')
-  assert.ok(APP.includes('class="search__icon"'), '必须有放大镜图标')
+  assert.ok(APP.includes('class="obox-input-group obox-mb-4"'), '必须有组件库的输入组容器')
+  assert.ok(APP.includes('class="obox-input-group__prefix"'), '必须有放大镜图标位')
   assert.ok(
     APP.includes('stroke="currentColor"'),
     '放大镜必须用 currentColor（色值只由 CSS token 决定，SVG 里不许写色值）'
   )
-  // 2) 样式关键值
-  assert.match(
-    STYLES,
-    /\.search\s*\{[^}]*padding:\s*20px 20px 0/,
-    '.search 的左右内边距须与 .app__grid 一致'
-  )
-  assert.match(
-    STYLES,
-    /\.search__field\s*\{[^}]*max-width:\s*400px/,
-    '.search__field 必须限宽 400px'
-  )
-  assert.match(
-    STYLES,
-    /\.search__icon\s*\{[^}]*color:\s*var\(--fg-dim\)/,
-    '放大镜默认色必须是 --fg-dim'
-  )
-  assert.match(
-    STYLES,
-    /\.search__field:focus-within \.search__icon\s*\{[^}]*color:\s*var\(--accent\)/,
-    '聚焦时放大镜必须转 --accent'
-  )
-  // 3) **层叠坑**：必须是 `.search .search__input`（0,2,0），不能是单类（0,1,0）
-  assert.match(
-    STYLES,
-    /\.search \.search__input\s*\{[^}]*border-radius:\s*999px/,
-    '必须用 .search .search__input 才能压过后面的 .input（靠特异度，不靠顺序）'
-  )
-  assert.match(
-    STYLES,
-    /\.search \.search__input\s*\{[^}]*padding-left:\s*30px/,
-    '左内边距要给图标让位'
-  )
-  assert.match(STYLES, /\.search \.search__input\s*\{[^}]*min-height:\s*32px/, '高度 32px')
-  // 不允许退回旧的单类写法（那会被 .input 覆盖）
-  assert.ok(
-    !/^\s*\.search__input\s*\{/m.test(STYLES),
-    '不得出现单类 `.search__input {`（会被后面的 .input 覆盖）'
-  )
+  // 2) 视觉关键值（胶囊形 / 限宽 / 图标着色）已由宿主组件库的 .obox-input-group 定义，
+  //    门禁在宿主仓库（test/ui-css.test.ts），本仓库不再重复断言样式文本。
 })
 
 test('反向用例：源码里不得出现 SingletonLock（Windows 上不存在该文件）', () => {
@@ -258,7 +214,6 @@ test('1.0.4：迁移状态展示全部移除（rootbar 四态 / 进度 / 继续 
     'ConfirmOverwrite'
   ]) {
     assert.ok(!APP.includes(needle), `App.vue 不得再出现 ${needle}（迁移信息不上界面）`)
-    assert.ok(!STYLES.includes(needle), `styles.css 不得再出现 ${needle}`)
   }
   assert.ok(
     !existsSync(fileURLToPath(new URL('../src/components/ConfirmOverwrite.vue', import.meta.url))),
@@ -317,13 +272,19 @@ test('1.0.4：删掉的是展示层——`index.js` 的迁移状态机与安全�
 
 test('界面纪律：底部状态栏与 rootbar 都不得复活，样式一律走 token', () => {
   assert.ok(!APP.includes('StatusBar'), 'App.vue 仍不得引用 StatusBar')
-  assert.ok(!STYLES.includes('.statusbar'), 'styles.css 仍不得有 .statusbar')
-  assert.ok(!STYLES.includes('.rootbar'), 'styles.css 不得有 .rootbar（迁移信息不上界面）')
-  // 保留下来的样式块仍必须是"零色彩字面量"
-  const searchBlock = STYLES.slice(STYLES.indexOf('.search {'), STYLES.indexOf('.app__grid {'))
-  assert.ok(searchBlock.length > 0, '必须仍有 .search 样式块')
-  assert.ok(
-    !/#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(searchBlock),
-    '.search 样式里不得出现色值字面量（只允许 var(--token)）'
-  )
+  // 样式表已删除（外观全部来自宿主组件库），所以"零色值字面量"这条改为扫源码：
+  // 页面/组件里不许出现颜色字面量，只能用 var(--token) 或组件库 class。
+  const sources = [
+    APP,
+    ...['WebappCard', 'WebappField', 'WebappModal', 'DeleteConfirm', 'EmptyState', 'OverLimitModal'].map(
+      (name) => source(`components/${name}.vue`)
+    )
+  ]
+  for (const text of sources) {
+    assert.ok(
+      !/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(text),
+      '源码里不得出现色值字面量（颜色必须来自主题 token 或组件库）'
+    )
+    assert.ok(!text.includes('.statusbar') && !text.includes('.rootbar'), '不得再有状态栏/rootbar 相关类名')
+  }
 })

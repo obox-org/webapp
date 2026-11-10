@@ -27,10 +27,10 @@ const emit = defineEmits(['action'])
 </script>
 
 <template>
-  <div class="empty">
-    <p class="empty__title">{{ title }}</p>
-    <p class="empty__hint">{{ hint }}</p>
-    <button v-if="showAction" type="button" class="btn btn--primary" @click="emit('action')">
+  <div class="obox-empty">
+    <p class="obox-text obox-text--accent obox-empty__text">{{ title }}</p>
+    <p class="obox-text obox-text--sm obox-text--secondary">{{ hint }}</p>
+    <button v-if="showAction" type="button" class="obox-btn obox-btn--primary" @click="emit('action')">
       {{ actionLabel }}
     </button>
   </div>

@@ -49,12 +49,12 @@ function change(key, value) {
 </script>
 
 <template>
-  <div class="field" :class="{ 'field--full': field.full || field.type === 'textarea' }">
+  <div class="obox-form-row" :class="'obox-form-row--full'">
     <!-- 勾选框：标签列留空占位（方框落到控件列 ⇒ 与其它控件的左边缘同一条竖线） -->
     <template v-if="field.type === 'check'">
-      <span class="field__label field__label--empty" aria-hidden="true"></span>
-      <div class="field__control">
-        <label class="check" :for="inputId">
+      <span class="obox-form-row__label" aria-hidden="true"></span>
+      <div class="obox-form-row__control">
+        <label class="obox-checkbox" :for="inputId">
           <input
             :id="inputId"
             type="checkbox"
@@ -67,18 +67,18 @@ function change(key, value) {
     </template>
 
     <template v-else>
-      <label class="field__label" :for="inputId">
+      <label class="obox-form-row__label" :for="inputId">
         {{ field.label }}
-        <span v-if="field.required" class="field__required" aria-hidden="true">*</span>
+        <span v-if="field.required" class="obox-text--danger" aria-hidden="true">*</span>
       </label>
 
-      <div class="field__control">
+      <div class="obox-form-row__control">
         <!-- 单行文本 -->
         <input
           v-if="field.type === 'text'"
           :id="inputId"
-          class="input"
-          :class="{ 'input--error': !!error }"
+          class="obox-input"
+          
           type="text"
           :aria-invalid="!!error"
           :value="form[field.key]"
@@ -89,8 +89,8 @@ function change(key, value) {
         <textarea
           v-else-if="field.type === 'textarea'"
           :id="inputId"
-          class="input textarea"
-          :class="{ 'input--error': !!error }"
+          class="obox-textarea"
+          
           :rows="field.rows || 4"
           :aria-invalid="!!error"
           :value="form[field.key]"
@@ -101,8 +101,8 @@ function change(key, value) {
         <select
           v-else-if="field.type === 'select'"
           :id="inputId"
-          class="select"
-          :class="{ 'select--error': !!error }"
+          class="obox-select"
+          
           :aria-invalid="!!error"
           :value="form[field.key]"
           @change="change(field.key, $event.target.value)"
@@ -121,19 +121,19 @@ function change(key, value) {
         </select>
 
         <!-- 成对输入（窗口尺寸 / 窗口位置） -->
-        <div v-else-if="field.type === 'pair'" class="pair">
+        <div v-else-if="field.type === 'pair'" class="obox-field-pair">
           <input
             :id="inputId"
-            class="input"
+            class="obox-input"
             type="text"
             inputmode="numeric"
             :aria-label="`${field.label}（${field.units ? field.units[0] : '前'}）`"
             :value="form[pairKeys[0]]"
             @input="change(pairKeys[0], $event.target.value)"
           />
-          <span class="pair__sep" aria-hidden="true">,</span>
+          <span class="obox-field-pair__sep" aria-hidden="true">,</span>
           <input
-            class="input"
+            class="obox-input"
             type="text"
             inputmode="numeric"
             :aria-label="`${field.label}（${field.units ? field.units[1] : '后'}）`"
@@ -144,8 +144,8 @@ function change(key, value) {
       </div>
     </template>
 
-    <p v-if="desc" class="field__desc">{{ desc }}</p>
-    <p v-if="warn" class="field__warn">{{ warn }}</p>
-    <p v-if="error" class="field__error">{{ error }}</p>
+    <p v-if="desc" class="obox-form-row__desc">{{ desc }}</p>
+    <p v-if="warn" class="obox-form-row__warn">{{ warn }}</p>
+    <p v-if="error" class="obox-form-row__error">{{ error }}</p>
   </div>
 </template>

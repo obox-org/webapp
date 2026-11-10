@@ -29,29 +29,29 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="obox-modal__mask">
     <div
-      class="modal modal--sm"
+      class="obox-modal__panel obox-modal__panel--sm"
       role="dialog"
       aria-modal="true"
       aria-labelledby="webapp-delete-title"
       tabindex="-1"
     >
-      <header class="modal__header">
-        <h2 id="webapp-delete-title" class="modal__title">删除网页应用「{{ name }}」？</h2>
+      <header class="obox-modal__header">
+        <h2 id="webapp-delete-title" class="obox-title obox-title--h3">删除网页应用「{{ name }}」？</h2>
       </header>
-      <div class="modal__body">
-        <p v-if="warning" class="modal__hint">{{ warning }}</p>
-        <p class="modal__text">
+      <div class="obox-modal__body">
+        <p v-if="warning" class="obox-text obox-text--sm obox-text--secondary">{{ warning }}</p>
+        <p class="obox-text">
           这会同时删除该站点的浏览器数据（登录状态、Cookie、缓存），删除后不可恢复。
         </p>
-        <p class="modal__hint">若该站点的窗口正开着，请先关闭它，否则删除会失败。</p>
+        <p class="obox-text obox-text--sm obox-text--secondary">若该站点的窗口正开着，请先关闭它，否则删除会失败。</p>
       </div>
-      <footer class="modal__footer">
+      <footer class="obox-modal__footer">
         <button
           ref="cancelButton"
           type="button"
-          class="btn"
+          class="obox-btn"
           :disabled="submitting"
           @click="emit('close')"
         >
@@ -59,11 +59,11 @@ onMounted(() => {
         </button>
         <button
           type="button"
-          class="btn btn--danger"
+          class="obox-btn obox-btn--danger"
           :disabled="submitting"
           @click="emit('confirm')"
         >
-          <span v-if="submitting" class="spinner" aria-hidden="true"></span>
+          <span v-if="submitting" class="obox-spinner" aria-hidden="true"></span>
           {{ submitting ? '删除中…' : '删除' }}
         </button>
       </footer>
