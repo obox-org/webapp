@@ -93,7 +93,7 @@ const ROOT_UNMARKED = '[profile-root-unmarked]'
 /** 迁移意图文件的相对路径（**写在扩展 data 目录**，不随根移动；规格 D4 / U-5） */
 const ROOT_INTENT_REL = ROOT_INTENT
 /** 扩展版本（五处一致：manifest / package / package-lock ×2 / 卡片注册） */
-const EXT_VERSION = '1.0.7'
+const EXT_VERSION = '1.1.0'
 /**
  * 「浏览…」的**降级文案**（规格 §7.4 的表；老宿主/能力探测失败时回给界面）。
  * 必须诚实：不承诺"一定能选目录"，并明确告诉用户下一步怎么做。
